@@ -2,6 +2,10 @@ package com.androidharness.app.evolve
 
 import java.io.File
 import java.nio.file.Files
+import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.JsonObject
+import com.androidharness.app.tools.ToolContext
+import com.androidharness.app.workspace.FileFs
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -107,9 +111,24 @@ class PromotionGateTest {
     }
 
     @Test
-    fun `there is no promote tool for the agent`() {
-        val tools = EvolveHost.at(root).tools().map { it.name }
-        assertTrue(tools.none { "promote" in it })
-        assertTrue(tools.all { tool -> EvolveHost.at(root).tools().first { it.name == tool }.isReadOnly })
+    fun `there is no promote tool for the agent`() = runBlocking {
+        saved("Baseline")
+        val host = EvolveHost.at(root)
+        val tools = host.tools()
+        assertTrue(tools.none { "promote" in it.name })
+        // Propose and evaluate are the only tools that write, and all they
+        // write is candidates, reports and archive entries. Everything else
+        // is read-only. (P0 had only read-only tools, so this test used to
+        // assert that for all of them; the loop cannot run without writers.)
+        assertEquals(
+            listOf("evolve_evaluate", "evolve_propose"),
+            tools.filter { !it.isReadOnly }.map { it.name }.sorted(),
+        )
+        // Running every tool must never make a genome active: promotion is a
+        // settings action behind an approval card, never an agent call.
+        val ctx = ToolContext(FileFs(root))
+        tools.forEach { it.execute(JsonObject(emptyMap()), ctx) }
+        assertNull(store.active())
+        assertNull(host.store.active())
     }
 }
