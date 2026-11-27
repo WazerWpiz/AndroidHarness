@@ -104,6 +104,7 @@ class ToolRegistry(private val tools: List<Tool>) {
             appSettings: com.androidharness.app.data.SettingsRepository? = null,
             automations: AutomationToolHost? = null,
             plugins: com.androidharness.app.plugins.PluginManager? = null,
+            evolve: com.androidharness.app.evolve.EvolveHost? = null,
         ): ToolRegistry {
             val baseTools = mutableListOf<Tool>(
                 ListDirTool(),
@@ -177,6 +178,7 @@ class ToolRegistry(private val tools: List<Tool>) {
             }
             if (dhizuku != null && deviceAccess != null) baseTools += DeviceOwnerShellTool(dhizuku, deviceAccess)
             if (pullRequests != null) baseTools += GitHubCreatePullRequestTool(pullRequests, sessionMessages)
+            if (evolve != null) baseTools += evolve.tools()
             if (artifactLoader != null) {
                 baseTools.add(CreateArtifactTool(artifactLoader))
                 baseTools.add(ReadArtifactTool(artifactLoader))

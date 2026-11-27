@@ -235,6 +235,8 @@ class AppContainer(val appContext: Context) {
     val sshConnections = com.androidharness.app.workspace.SshConnections(keys)
     val workspace = WorkspaceManager(appContext, db.dao(), sshConnections)
     val fileHistory = com.androidharness.app.data.WorkspaceFileHistory(java.io.File(appContext.filesDir, "workspace-file-history"))
+    // Genome data lives in app storage, not the project: it describes the harness, not a workspace.
+    val evolveHost = com.androidharness.app.evolve.EvolveHost.at(java.io.File(appContext.filesDir, "evolve"))
     val checkpoints = CheckpointStore(db.dao(), fileHistory)
 
     val todoStore = TodoStore()
@@ -363,6 +365,7 @@ class AppContainer(val appContext: Context) {
         appSettings = settings,
         plugins = pluginManager,
         // Declared below; resolved on each call, after construction.
+        evolve = evolveHost,
         automations = com.androidharness.app.tools.AutomationToolHost(
             target = { sid ->
                 val session = sessions.session(sid)

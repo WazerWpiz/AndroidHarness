@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Recursive harness, groundwork**: a genome is now a real, hashed artefact with content-addressed storage, an archive DAG that keeps losing candidates as stepping stones, a protected-path list that refuses any genome naming the evaluator, safety probes, shell policy, redactor or signing config, and a promotion gate that can only be opened by a person's approval and rolls back to the exact parent hash. Settings → Coding → Recursive harness shows the archive read-only. The model stays frozen; nothing runs until the runner and its approval cards arrive. There is deliberately no promote tool for the agent.
+
 ## 4.1 (2026-11-25)
 
 ### Added

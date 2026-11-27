@@ -45,7 +45,7 @@ android {
     namespace = "com.androidharness.app"
     // The in-app picker must be able to switch languages without a Play download.
     bundle { language { enableSplit = false } }
-    compileSdk = 37
+    compileSdk = 36
     if (hasNdk) {
         ndkVersion = pinnedNdk
         externalNativeBuild {
@@ -187,6 +187,24 @@ configurations.configureEach {
     }
 }
 
+// Lifecycle 2.8 split its artifacts into -android/-jvm variants. The old
+// coordinate androidx.lifecycle:lifecycle-runtime-ktx is still requested by
+// androidx.activity:activity-ktx:1.8.1 (via fragment-ktx:1.8.6) at 2.6.1, a
+// real AAR with namespace androidx.lifecycle.ktx. The Compose BOM aligns the
+// new coordinate lifecycle-runtime-ktx-android to 2.11.0, which declares the
+// same namespace, so the manifest merger rejects the pair. Lift the old
+// coordinate to 2.9.4: from 2.8 on the old coordinates are empty "anchor"
+// AARs (namespace *.anchor, no collision) and the real code comes from the
+// -android artifact the BOM already pulls in. 2.9.4 is the version this
+// project already pins for lifecycle in gradle/libs.versions.toml.
+configurations.configureEach {
+    resolutionStrategy.eachDependency {
+        if (requested.group == "androidx.lifecycle" && requested.name == "lifecycle-runtime-ktx") {
+            useVersion("2.9.4")
+        }
+    }
+}
+
 dependencies {
     implementation(libs.backdrop)
     if (distributionChannel == "play") implementation("com.google.android.play:feature-delivery:2.1.0")
@@ -205,6 +223,10 @@ dependencies {
     implementation(libs.compose.ui.tooling.preview)
     implementation(libs.compose.material3)
     implementation("com.materialkolor:material-kolor:5.0.1")
+    // material-kolor 5.0.1's Android AAR no longer ships com.materialkolor.quantize /
+    // com.materialkolor.score (used by HarnessCanvasStore for the canvas seed);
+    // they moved to the material-color-utilities artifact.
+    implementation("com.materialkolor:material-color-utilities:6.1.0")
     implementation(libs.compose.material.icons.extended)
     debugImplementation(libs.compose.ui.tooling)
 

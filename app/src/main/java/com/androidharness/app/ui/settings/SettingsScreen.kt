@@ -513,6 +513,7 @@ private fun SettingsScreenContent(
                                 onSearchChatChats = { value -> scope.launch { container.settings.setCodeSearchChatChats(value) } },
                             )
                             CodingSection { page -> openPage(page) }
+                            SettingsAnchor(R.string.recursive_harness_title) { RecursiveHarnessSection() }
                         }
                         SettingsPage.NINE_ROUTER -> NineRouterSection(container)
                         SettingsPage.CONNECTED_ACCOUNTS -> ConnectedAccountsSection(container)
@@ -1616,9 +1617,12 @@ private fun WirelessAdbSection(container: AppContainer) {
             return
         }
         if (Build.VERSION.SDK_INT >= 36 &&
-            context.checkSelfPermission(Manifest.permission.ACCESS_LOCAL_NETWORK) != PackageManager.PERMISSION_GRANTED
+            // Manifest.permission.ACCESS_LOCAL_NETWORK is an API 37 constant
+            // and this build compiles against API 36 (Google has not
+            // published an API 37 platform). The string is the same value.
+            context.checkSelfPermission("android.permission.ACCESS_LOCAL_NETWORK") != PackageManager.PERMISSION_GRANTED
         ) {
-            localNetwork.launch(Manifest.permission.ACCESS_LOCAL_NETWORK)
+            localNetwork.launch("android.permission.ACCESS_LOCAL_NETWORK")
         } else {
             startWirelessPairing(context)
         }
