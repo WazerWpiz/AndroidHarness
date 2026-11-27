@@ -83,12 +83,15 @@ class EvolutionRunner(
         val candidateIds = mutableListOf<String>()
         var best: Pair<Genome, EvalReport>? = null
         var attempts = 0
+        // The proposer sees the training tasks of both suites, ids and
+        // titles only; the holdouts of both suites stay hidden.
+        val trainingTasks = LiveEvaluator.proposerView().tasks + RealProjectEvaluator.proposerView().tasks
         while (attempts < settings.maxCandidates && !ledger.shouldStop()) {
             attempts++
             val histories = archive.entries().mapNotNull { it.hypothesis.ifBlank { null } }
             val hints = TraceMiner.mine(histories).suggestedHints
             when (val proposed = LlmProposer.propose(
-                caller, parent, parentReport, archive.entries(), LiveEvaluator.proposerView().tasks, hints,
+                caller, parent, parentReport, archive.entries(), trainingTasks, hints,
             )) {
                 is LlmProposer.Proposed.Failed -> {
                     failures += proposed.reason
@@ -102,9 +105,13 @@ class EvolutionRunner(
                     val stored = store.save(proposed.genome)
                     candidateIds += stored.id
                     val evalDir = File(workDir, "eval-${stored.id}").apply { mkdirs() }
-                    val (report, tokens) = LiveEvaluator.evaluate(stored, caller, evalDir)
-                    ledger.consume(BudgetRole.WORKER, tokens.first, report.wallMs)
-                    ledger.consume(BudgetRole.CRITIC, tokens.second, 0)
+                    val (liveReport, liveTokens) = LiveEvaluator.evaluate(stored, caller, evalDir)
+                    val (realReport, realTokens) = RealProjectEvaluator.evaluate(
+                        stored, caller, File(workDir, "real-eval-${stored.id}"),
+                    )
+                    ledger.consume(BudgetRole.WORKER, liveTokens.first + realTokens.first, liveReport.wallMs + realReport.wallMs)
+                    ledger.consume(BudgetRole.CRITIC, liveTokens.second + realTokens.second, 0)
+                    val report = mergeReports(liveReport, realReport, liveTokens, realTokens)
                     val violations = SafetyProbes.safetyViolations(stored, evalDir)
                     val finalReport = report.copy(safetyViolations = violations)
                     store.saveReport(finalReport)
@@ -142,6 +149,40 @@ class EvolutionRunner(
             promotableId = best?.first?.id,
             stoppedReason = ledger.stopReason(),
             proposalFailures = failures,
+        )
+    }
+
+    /**
+     * One report over both suites: the live toy suite and the real-project
+     * suite. The suite identity stays the live suite's, so the archive,
+     * the gate and the reports API keep reading one report per candidate,
+     * with the holdout score now spanning both suites' holdouts.
+     */
+    private fun mergeReports(
+        live: EvalReport,
+        real: EvalReport,
+        liveTokens: Pair<Long, Long>,
+        realTokens: Pair<Long, Long>,
+    ): EvalReport {
+        val tasks = live.tasks + real.tasks
+        val holdout = tasks.filter { it.holdout }
+        val successes = tasks.count { it.passed }
+        val totalTokens = liveTokens.first + liveTokens.second + realTokens.first + realTokens.second
+        return EvalReport(
+            genomeId = live.genomeId,
+            suiteId = LiveEvaluator.SUITE_ID,
+            suiteVersion = LiveEvaluator.SUITE_VERSION,
+            seeds = listOf(1),
+            tasks = tasks,
+            successRate = successes.toDouble() / tasks.size,
+            tokensPerSuccess = if (successes == 0) 0.0 else totalTokens.toDouble() / successes,
+            toolValidity = 1.0,
+            meanTurns = 1.0,
+            safetyViolations = 0,
+            wallMs = live.wallMs + real.wallMs,
+            modelPin = live.modelPin.ifBlank { real.modelPin },
+            envPin = live.envPin,
+            holdoutScore = if (holdout.isEmpty()) null else holdout.count { it.passed }.toDouble() / holdout.size,
         )
     }
 

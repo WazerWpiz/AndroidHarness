@@ -63,7 +63,7 @@ activated and who approved it. It is only written by `PromotionGate`.
 ## Protected paths
 
 `ProtectedPaths` is the fixed point of the loop. It lists the trusted-core files
-(`GenomeStore`, `Archive`, `PromotionGate`, `LiveEvaluator`, `LlmProposer`, `SafetyProbes`, `BudgetLedger`,
+(`GenomeStore`, `Archive`, `PromotionGate`, `LiveEvaluator`, `RealProjectEvaluator`, `LlmProposer`, `SafetyProbes`, `BudgetLedger`,
 `ShellPolicy`, `SecretRedactor`), the build and signing configuration, and the holdout
 suite directory. Matching is case-insensitive, accepts either slash, and also refuses
 `.keystore`, `.jks` and `.p12` files.
@@ -164,11 +164,12 @@ worker, the run refuses instead of scoring anything fake.
   phrases come out, never raw traces or secrets.
 
 Honest limit: a phone has no Docker and cannot run SWE-bench, so the
-benchmark is 8 small local tasks with fixed checkers plus a critic —
-the same loop mechanics as DGM (archive → self-modify → empirical
-validation → promote on merit), phone-scale benchmark. The score
-measures what a candidate's instructions do to a real model's work:
-the harness never computes the answer itself.
+benchmark is 8 small local tasks with fixed checkers plus a critic,
+plus 4 real-project tasks (see P4 below) — the same loop mechanics as
+DGM (archive → self-modify → empirical validation → promote on merit),
+phone-scale benchmark. The score measures what a candidate's
+instructions do to a real model's work: the harness never computes the
+answer itself.
 
 ## P3 — activation wiring (shipped)
 
@@ -196,6 +197,61 @@ Honest limits: genome hooks (`GenomeHook`) and per-agent profiles
 agent yet — only instructions and enabled skills reach the prompt. A run
 survives leaving Settings but not the app process being killed; there is no
 foreground service.
+
+## P4 — real-project evaluation (shipped)
+
+The live suite proves a candidate can follow instructions; it does not
+prove the candidate helps on real code. `RealProjectEvaluator` (suite
+`evolve-real-v1`) scores candidates on the real project itself —
+AndroidHarness, this repo — with real test commands:
+
+- `real-genome-id` (training): repair `Genome.kt` so `GenomeTest` passes.
+- `real-budget-ledger` (training): repair `BudgetLedger.kt` so
+  `BudgetLedgerTest` passes.
+- `real-trace-miner` (training): repair `TraceMiner.kt` so
+  `TraceMinerTest` passes.
+- `real-secret-redactor` (holdout): repair `SecretRedactor.kt` so
+  `SecretRedactorTest` passes. The proposer never sees it.
+
+Each task is a minimal JVM Gradle project built in the scratch dir from
+verbatim copies of the real source and test files, with exactly one
+documented line broken in the fix-target file. The worker must repair
+that line; the fixed checker then runs the real `gradle test --tests ...`
+command for the task through the app's shell toolchain
+(`ShellTestCommandRunner` over `ShellTierRouter`) and passes only on
+exit code 0. Test files and build files are guarded by exact-text
+comparison before Gradle runs, so the worker cannot pass by editing the
+test, and only the one fix-target file may change. A separate critic
+model still gives a second opinion after the tests pass, as in the live
+suite.
+
+The runner merges both suites into one `EvalReport`: 12 tasks (8 live +
+4 real), the holdout score over all 3 holdouts (2 live + 1 real), the
+token counts combined, and the suite identity stays `evolve-live-v1`,
+so the gate, the archive and the reports API keep working on one report
+per candidate. The proposer sees the combined training tasks of both
+suites (9 ids and titles); the holdouts of both suites stay hidden.
+
+Honest limits: the real suite requires the optional Linux toolchain +
+Android build tools to be installed (Settings); on-phone Gradle runs
+are slow and battery-heavy, each test command is capped at 10 minutes,
+and the first run downloads the Kotlin Gradle plugin. If the toolchain
+is not installed, the real tasks fail with a clear detail and the run
+continues on the live suite alone — never a fake pass. The file
+snapshots are frozen at P4 time; regenerate them with
+`scripts/gen-real-project-tasks.py` after the source files change. The
+standalone `evolve_evaluate` tool still runs the live suite only. The
+Gradle test JVM compiles and runs worker-written code as the app user —
+the same trust level as the agent's shell use — and `SafetyProbes`
+still vets the candidate genome itself. No orphaned processes: the
+shell runner kills the child's process group and destroys the process
+on timeout and on cancellation, and captured output is capped at
+32,000 characters per stream, so a stopped or timed-out Gradle run
+cannot keep eating RAM or battery. Memory stays small: the runner
+keeps only the merged report (12 task results) plus the capped command
+tail; the file guard rejects a changed file by byte length before
+reading it, and file listings read at most 8,000 characters per file,
+so a huge worker-written file is never loaded into memory.
 
 ## Safety hardening (shipped with P3)
 

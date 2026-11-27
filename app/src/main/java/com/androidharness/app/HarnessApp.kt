@@ -271,6 +271,11 @@ class AppContainer(val appContext: Context) {
                 }
             }
         }
+        // P4: the real-project evaluator runs its Gradle tests through the
+        // shell router (ShellTestCommandRunner); until this is wired, its
+        // tasks fail honestly with the toolchain-missing detail.
+        com.androidharness.app.evolve.RealProjectEvaluator.commandRunner =
+            com.androidharness.app.evolve.ShellTestCommandRunner(shellRouter, linuxEnv)
     }
 
     val updates = com.androidharness.app.data.update.UpdateManager(appContext, deviceAccess)

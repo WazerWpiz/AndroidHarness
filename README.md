@@ -33,6 +33,15 @@ The app has two sections:
 
 You can start for free with the built-in provider, which needs no account, or run models fully offline on the device.
 
+## Added features
+
+This fork is upstream AndroidHarness plus the features below — nothing else is redesigned or changed.
+
+- **Recursive Harness settings section (P0).** Genome store and archive, promotion gate, safety probes, and read-only evolve tools under Settings → Coding → Recursive harness.
+- **Real model-backed evolution (DGM + Voyager).** Proposer, worker and critic roles, live benchmark evaluation, and no fake or template scores — a candidate only scores what a real model does.
+- **Activation wiring and safety (P3).** The active genome reaches the agent's prompt behind an on/off toggle, runs are app-scoped with a Stop button, an override-phrase blacklist refuses genomes that try to talk the agent out of its safety rules, and the promotion gate requires a win on training AND holdout.
+- **Real-project evaluation (P4).** Suite `evolve-real-v1` scores candidates on the real project itself: minimal Gradle projects built from verbatim repo files, verified by real Gradle test commands run on-device through the app's shell toolchain.
+
 ## Screenshots
 
 <table>

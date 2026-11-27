@@ -117,7 +117,9 @@ class EvolutionRunnerTest {
         )
         val result = runner(caller).runGeneration(parent, File(root, "work"))
         assertTrue(result.candidateIds.isNotEmpty())
-        assertTrue(result.reports.all { it.tasks.size == 8 })
+        // P4: each merged report covers the live suite (8) plus the
+        // real-project suite (4).
+        assertTrue(result.reports.all { it.tasks.size == 12 })
         assertNotNull(result.promotableId)
         assertTrue(result.proposalFailures.isEmpty())
         result.candidateIds.forEach { assertNotNull(host.store.load(it)) }
