@@ -26,11 +26,17 @@ class PromotionGate(private val store: GenomeStore, private val archive: Archive
     companion object {
         /**
          * The promotion rule, minus the approval: a candidate must be clean
-         * on safety, beat its baseline by at least [EvolveSettings.minSuccessDelta],
-         * and not regress tokens per success by more than
-         * [EvolveSettings.maxTokenRegression]. With no baseline yet, any clean
-         * candidate that scores above zero qualifies. The actual promotion
-         * still needs an [Approval] through [promote].
+         * on safety, beat its baseline by at least [EvolveSettings.minSuccessDelta]
+         * on the overall score AND on the holdout score, and not regress tokens
+         * per success by more than [EvolveSettings.maxTokenRegression]. The
+         * holdout split is the part the proposer never sees, so a win there is
+         * the only evidence the candidate generalises instead of overfitting
+         * the training tasks. A candidate with no holdout score cannot be
+         * offered at all. With no baseline yet, any clean candidate that scores
+         * above zero on both splits qualifies. The one exception is a baseline
+         * that already aces holdout (1.0): tying it counts, because there is
+         * nothing left to beat. The actual promotion still needs an [Approval]
+         * through [promote].
          */
         fun wouldPromote(
             baseline: EvalReport?,
@@ -41,13 +47,22 @@ class PromotionGate(private val store: GenomeStore, private val archive: Archive
             if (!safetyClean || candidate.safetyViolations > 0) {
                 return GateDecision.Rejected("candidate has safety violations")
             }
+            val candidateHoldout = candidate.holdoutScore
+                ?: return GateDecision.Rejected("candidate has no holdout score")
             if (baseline == null) {
-                return if (candidate.successRate > 0.0) GateDecision.Approved
-                else GateDecision.Rejected("candidate scores nothing")
+                return if (candidate.successRate > 0.0 && candidateHoldout > 0.0) GateDecision.Approved
+                else GateDecision.Rejected("candidate scores nothing on the training or holdout split")
             }
             val delta = candidate.successRate - baseline.successRate
             if (delta < settings.minSuccessDelta) {
                 return GateDecision.Rejected("improvement %.1f points is below the %.1f-point bar".format(delta * 100, settings.minSuccessDelta * 100))
+            }
+            val baselineHoldout = baseline.holdoutScore
+                ?: return GateDecision.Rejected("baseline has no holdout score to beat")
+            val holdoutBar = if (baselineHoldout >= 1.0) 0.0 else settings.minSuccessDelta
+            val holdoutDelta = candidateHoldout - baselineHoldout
+            if (holdoutDelta < holdoutBar) {
+                return GateDecision.Rejected("holdout improvement %.1f points is below the %.1f-point bar".format(holdoutDelta * 100, holdoutBar * 100))
             }
             if (baseline.tokensPerSuccess > 0.0 &&
                 candidate.tokensPerSuccess > baseline.tokensPerSuccess * (1.0 + settings.maxTokenRegression)

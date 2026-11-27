@@ -272,6 +272,13 @@ class AgentEngine(
     private val imageTextEnabled: suspend () -> Boolean = { false },
     private val resolveConfiguration: suspend (WorkspaceFs) -> com.androidharness.app.config.HarnessConfig = { com.androidharness.app.config.HarnessConfigLoader().load(it) },
     private val pluginHooks: com.androidharness.app.config.PluginHooks? = null,
+    /**
+     * The recursive harness host, read fresh on each prompt: when the harness
+     * is switched on and a genome is active, the agent follows that genome's
+     * instructions and enabled skills. Null (or off, or no active genome)
+     * leaves the prompt exactly as shipped.
+     */
+    private val evolveHost: () -> com.androidharness.app.evolve.EvolveHost? = { null },
     /** Remembers a provider|model whose server delivered a whole file write in one chunk. */
     private val markBufferedToolCalls: suspend (String) -> Unit = {},
     private val markFileBlocksDeclined: suspend (String) -> Unit = {},
@@ -2645,6 +2652,9 @@ class AgentEngine(
                     .append(block)
             }
         }
+        evolveHost()?.let { host ->
+            com.androidharness.app.evolve.EvolvePrompt.sectionFor(host)?.let { sb.append(it) }
+        }
         return sb.toString()
     }
 
@@ -2784,6 +2794,9 @@ ${if (appSettings.subagentsEnabled) "- For broad exploration whose raw output wo
             if (!map.isNullOrBlank()) {
                 sb.append("\n# Repository Map (codebase index)\n").append(map).append('\n')
             }
+        }
+        evolveHost()?.let { host ->
+            com.androidharness.app.evolve.EvolvePrompt.sectionFor(host)?.let { sb.append(it) }
         }
         return sb.toString()
     }

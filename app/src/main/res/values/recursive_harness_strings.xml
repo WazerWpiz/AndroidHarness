@@ -9,11 +9,14 @@
     <string name="recursive_harness_rule" translatable="false">Weights are never modified. Safety checks are never evolved.</string>
     <string name="recursive_harness_run" translatable="false">Run one evolution</string>
     <string name="recursive_harness_running" translatable="false">Running…</string>
+    <string name="recursive_harness_stop" translatable="false">Stop</string>
     <string name="recursive_harness_promotable" translatable="false">Ready to promote</string>
     <string name="recursive_harness_promote" translatable="false">Promote</string>
     <string name="recursive_harness_dismiss" translatable="false">Dismiss</string>
     <string name="recursive_harness_no_candidate" translatable="false">No candidate met the promotion bar.</string>
     <string name="recursive_harness_run_failed" translatable="false">Run failed.</string>
+    <string name="recursive_harness_enabled" translatable="false">Use the active genome</string>
+    <string name="recursive_harness_enabled_description" translatable="false">When on, the agent follows the active genome\'s instructions and enabled skills. When off, the agent behaves as shipped. Runs work either way.</string>
     <string name="recursive_harness_proposer" translatable="false">Proposer model</string>
     <string name="recursive_harness_worker" translatable="false">Worker model</string>
     <string name="recursive_harness_critic" translatable="false">Critic model</string>

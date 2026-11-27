@@ -454,6 +454,7 @@ class AppContainer(val appContext: Context) {
         remindersEnabled = { settings.settings.first().chatRemindersEnabled },
         imageText = imageText,
         imageTextEnabled = { settings.settings.first().readImageText },
+        evolveHost = { evolveHost },
     )
     val runManager = com.androidharness.app.agent.RunManager(
         context = appContext,

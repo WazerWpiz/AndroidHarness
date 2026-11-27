@@ -173,19 +173,43 @@ class EvolutionRunnerTest {
     @Test
     fun `the gate rule without approval - delta, safety and token regression`() {
         val settings = EvolveSettings.DEFAULT
-        val baseline = EvalReport(genomeId = "base", successRate = 0.5, tokensPerSuccess = 100.0)
-        val same = EvalReport(genomeId = "same", successRate = 0.5, tokensPerSuccess = 100.0)
+        val baseline = EvalReport(genomeId = "base", successRate = 0.5, holdoutScore = 0.5, tokensPerSuccess = 100.0)
+        val same = EvalReport(genomeId = "same", successRate = 0.5, holdoutScore = 0.5, tokensPerSuccess = 100.0)
         assertTrue(PromotionGate.wouldPromote(baseline, same, true, settings) is GateDecision.Rejected)
-        val better = EvalReport(genomeId = "better", successRate = 0.6, tokensPerSuccess = 100.0)
+        val better = EvalReport(genomeId = "better", successRate = 0.6, holdoutScore = 1.0, tokensPerSuccess = 100.0)
         assertTrue(PromotionGate.wouldPromote(baseline, better, true, settings) is GateDecision.Approved)
-        val unsafe = EvalReport(genomeId = "unsafe", successRate = 0.9, tokensPerSuccess = 100.0, safetyViolations = 1)
+        val unsafe = EvalReport(genomeId = "unsafe", successRate = 0.9, holdoutScore = 1.0, tokensPerSuccess = 100.0, safetyViolations = 1)
         assertTrue(PromotionGate.wouldPromote(baseline, unsafe, false, settings) is GateDecision.Rejected)
-        val wasteful = EvalReport(genomeId = "wasteful", successRate = 0.6, tokensPerSuccess = 200.0)
+        val wasteful = EvalReport(genomeId = "wasteful", successRate = 0.6, holdoutScore = 1.0, tokensPerSuccess = 200.0)
         assertTrue(PromotionGate.wouldPromote(baseline, wasteful, true, settings) is GateDecision.Rejected)
-        val first = EvalReport(genomeId = "first", successRate = 0.5)
+        val first = EvalReport(genomeId = "first", successRate = 0.5, holdoutScore = 0.5)
         assertTrue(PromotionGate.wouldPromote(null, first, true, settings) is GateDecision.Approved)
         val zero = EvalReport(genomeId = "zero", successRate = 0.0)
         assertTrue(PromotionGate.wouldPromote(null, zero, true, settings) is GateDecision.Rejected)
+    }
+
+    @Test
+    fun `the gate also needs a holdout win`() {
+        val settings = EvolveSettings.DEFAULT
+        val baseline = EvalReport(genomeId = "base", successRate = 0.5, holdoutScore = 0.5, tokensPerSuccess = 100.0)
+        // Wins training, ties holdout: overfitting the training split is not enough.
+        val trainingOnly = EvalReport(genomeId = "training-only", successRate = 0.8, holdoutScore = 0.5, tokensPerSuccess = 100.0)
+        assertTrue(PromotionGate.wouldPromote(baseline, trainingOnly, true, settings) is GateDecision.Rejected)
+        // Wins training, loses holdout.
+        val holdoutLoss = EvalReport(genomeId = "holdout-loss", successRate = 0.9, holdoutScore = 0.0, tokensPerSuccess = 100.0)
+        assertTrue(PromotionGate.wouldPromote(baseline, holdoutLoss, true, settings) is GateDecision.Rejected)
+        // No holdout evidence at all cannot be offered.
+        val noHoldout = EvalReport(genomeId = "no-holdout", successRate = 0.8, tokensPerSuccess = 100.0)
+        assertTrue(PromotionGate.wouldPromote(baseline, noHoldout, true, settings) is GateDecision.Rejected)
+        val bothWin = EvalReport(genomeId = "both-win", successRate = 0.8, holdoutScore = 1.0, tokensPerSuccess = 100.0)
+        assertTrue(PromotionGate.wouldPromote(baseline, bothWin, true, settings) is GateDecision.Approved)
+        // The first candidate must score on holdout too.
+        val firstFlat = EvalReport(genomeId = "first-flat", successRate = 0.8, holdoutScore = 0.0)
+        assertTrue(PromotionGate.wouldPromote(null, firstFlat, true, settings) is GateDecision.Rejected)
+        // A parent that already aces holdout cannot be beaten there, so tying it counts.
+        val aceBaseline = EvalReport(genomeId = "ace", successRate = 0.5, holdoutScore = 1.0, tokensPerSuccess = 100.0)
+        val aceTie = EvalReport(genomeId = "ace-tie", successRate = 0.8, holdoutScore = 1.0, tokensPerSuccess = 100.0)
+        assertTrue(PromotionGate.wouldPromote(aceBaseline, aceTie, true, settings) is GateDecision.Approved)
     }
 
     @Test

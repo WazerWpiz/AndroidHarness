@@ -5,7 +5,8 @@ import com.androidharness.app.config.HookEvents
 /**
  * What a genome may contain, checked before it is stored and again before it is promoted.
  * Everything here is a refusal: a genome that widens permissions, registers plugins or MCP
- * servers, names the trusted core, or carries an unknown hook event has no valid form.
+ * servers, names the trusted core, tries to talk the agent out of its own safety rules,
+ * or carries an unknown hook event has no valid form.
  */
 object GenomeRules {
 
@@ -17,6 +18,55 @@ object GenomeRules {
     private const val MAX_SKILLS_TOTAL = 512_000
     private const val MAX_HOOKS = 32
     private const val MAX_AGENTS = 16
+
+    /**
+     * Phrases that try to talk the agent out of its own rules. A genome is data
+     * the agent reads, never an instruction to the harness, so text that tells
+     * the agent to ignore, forget, disable, bypass or override its instructions
+     * or safety rules — or to become a different, unrestricted agent — is
+     * refused before storage, the same as naming the trusted core.
+     */
+    private val OVERRIDE_PHRASES = listOf(
+        "ignore previous instructions",
+        "ignore all previous instructions",
+        "ignore your instructions",
+        "ignore the instructions",
+        "disregard previous instructions",
+        "disregard all previous instructions",
+        "disregard your instructions",
+        "forget your instructions",
+        "forget all previous instructions",
+        "disable safety",
+        "disable the safety",
+        "bypass safety",
+        "bypass the safety",
+        "override safety",
+        "override the safety",
+        "override your safety",
+        "ignore safety",
+        "turn off safety",
+        "you are now a",
+        "you are now an",
+    )
+
+    /** A denial ("never ignore…", "do not disable…") is not itself an override. */
+    private val NEGATION = Regex("\\b(never|not|n't|don't|do not|must not|should not|cannot|can't)\\b")
+
+    /** The first override phrase that is not denied by a negation just before it, or null. */
+    private fun findOverridePhrase(text: String): String? {
+        val lower = text.lowercase()
+        for (phrase in OVERRIDE_PHRASES) {
+            var from = 0
+            while (true) {
+                val at = lower.indexOf(phrase, from)
+                if (at < 0) break
+                val before = lower.substring(maxOf(0, at - 20), at)
+                if (!NEGATION.containsMatchIn(before)) return phrase
+                from = at + phrase.length
+            }
+        }
+        return null
+    }
 
     /** Returns the genome with a recomputed id, or throws with the first reason it cannot be stored. */
     fun requireValid(genome: Genome): Genome {
@@ -65,6 +115,12 @@ object GenomeRules {
         if (referenced.isNotEmpty()) {
             throw ProtectedPathException(
                 "This genome names the trusted core (${referenced.joinToString(", ")}), which no genome may change.",
+            )
+        }
+        val override = findOverridePhrase(text)
+        if (override != null) {
+            throw IllegalArgumentException(
+                "This genome tries to override safety rules (\"$override\"), which no genome may do.",
             )
         }
         val identified = genome.identified()

@@ -4,9 +4,10 @@ The recursive harness evolves the part of the agent that is data: instructions, 
 hooks and agent profiles. Model weights never change. The design is scaffolding evolution
 in the spirit of the Darwin Gödel Machine and Voyager, not fine-tuning.
 
-This page documents the P0 groundwork that ships today: genomes, the archive, protected
-paths and the promotion gate. The proposer, evaluator and scheduler build on it in later
-phases; until then the loop cannot start and the feature is inert by construction.
+This page documents the recursive harness as it ships today: genomes, the archive,
+protected paths, the promotion gate, the real model-backed proposer and evaluator,
+and the wiring that lets an approved genome change how the agent works. Model
+weights never change.
 
 ## What a genome is
 
@@ -62,7 +63,7 @@ activated and who approved it. It is only written by `PromotionGate`.
 ## Protected paths
 
 `ProtectedPaths` is the fixed point of the loop. It lists the trusted-core files
-(`GenomeStore`, `Archive`, `PromotionGate`, `EvalHarness`, `SafetyProbes`, `BudgetLedger`,
+(`GenomeStore`, `Archive`, `PromotionGate`, `LiveEvaluator`, `LlmProposer`, `SafetyProbes`, `BudgetLedger`,
 `ShellPolicy`, `SecretRedactor`), the build and signing configuration, and the holdout
 suite directory. Matching is case-insensitive, accepts either slash, and also refuses
 `.keystore`, `.jks` and `.p12` files.
@@ -109,7 +110,7 @@ active id (or the genome's parent), loads it, checks the hash, and activates it 
 
 ## Tools
 
-The agent sees three read-only tools:
+The agent sees five tools:
 
 | Tool | Behaviour |
 | --- | --- |
@@ -168,6 +169,52 @@ the same loop mechanics as DGM (archive → self-modify → empirical
 validation → promote on merit), phone-scale benchmark. The score
 measures what a candidate's instructions do to a real model's work:
 the harness never computes the answer itself.
+
+## P3 — activation wiring (shipped)
+
+An approved genome now changes how the agent works, gated by a switch the
+user controls:
+
+- Settings → Coding → Recursive harness has a "Use the active genome"
+  switch, bound to `EvolveSettings.enabled`. Off means the agent behaves
+  exactly as shipped. Runs work either way.
+- `EvolvePrompt.sectionFor(host)` appends one section to the agent's system
+  prompt — in both the chat path and the coding path — only when the switch
+  is on AND an active genome exists: the genome's instructions as bullets
+  plus the text of its enabled skills (capped at 8,000 characters total).
+  The section states the instructions never override safety rules, tool
+  restrictions, or the user's current request. With the switch off, or with
+  no active genome, the prompt is byte-identical to the shipped one.
+- "Run one evolution" now runs in `EvolveHost`'s app scope, not the Settings
+  screen's scope: leaving Settings no longer cancels the run. Run state
+  (running, summary, promotable candidate, error) lives in the host and is
+  shown again on return. A Stop button cancels the run; a stopped run leaves
+  no partial promotion.
+
+Honest limits: genome hooks (`GenomeHook`) and per-agent profiles
+(`GenomeAgent`) are stored, validated and scored, but NOT applied to the
+agent yet — only instructions and enabled skills reach the prompt. A run
+survives leaving Settings but not the app process being killed; there is no
+foreground service.
+
+## Safety hardening (shipped with P3)
+
+Two more layers, added before the activation wiring shipped:
+
+- `GenomeRules` refuses any genome whose text tries to override safety:
+  "ignore previous instructions", "disable safety", "bypass safety",
+  "you are now an …" and similar phrases are refused before storage, the
+  same as naming the trusted core. The check covers instructions, skill
+  text, hook commands and matchers, agent instructions, proposer notes and
+  the hypothesis. A denial ("never ignore…", "do not disable…") is not
+  itself an override and still passes.
+- `PromotionGate.wouldPromote` now requires a win on BOTH splits: the
+  candidate must beat its parent by at least `minSuccessDelta` on the
+  overall score AND on the holdout score, which the proposer never sees.
+  A candidate with no holdout score cannot be offered at all, and neither
+  can a first candidate that scores zero on holdout. The one exception is
+  a parent that already aces holdout (1.0): tying it counts, because there
+  is nothing left to beat.
 
 ## Safety model
 

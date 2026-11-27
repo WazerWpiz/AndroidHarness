@@ -10,6 +10,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -31,7 +32,6 @@ import com.androidharness.app.R
 import com.androidharness.app.data.ChatModelChoice
 import com.androidharness.app.evolve.ArchiveEntry
 import com.androidharness.app.evolve.EvolveRole
-import com.androidharness.app.evolve.Genome
 import com.androidharness.app.evolve.PromotionGate
 import com.androidharness.app.llm.effectiveApiKey
 import com.androidharness.app.ui.chat.components.ModelPickerSheet
@@ -61,11 +61,24 @@ internal fun RecursiveHarnessSection(container: AppContainer) {
     var pickingRole by remember { mutableStateOf<EvolveRole?>(null) }
     var entries by remember { mutableStateOf<List<ArchiveEntry>>(emptyList()) }
     var activeLabel by remember { mutableStateOf<String?>(null) }
-    var running by remember { mutableStateOf(false) }
-    var runStatus by remember { mutableStateOf<String?>(null) }
-    var promotableId by remember { mutableStateOf<String?>(null) }
+    // The run lives in the host, not in this screen: leaving Settings does
+    // not stop it, and coming back shows its live state.
+    val runState by host.runState.collectAsStateWithLifecycle(initialValue = null)
+    val running = runState?.running == true
+    var localError by remember { mutableStateOf<String?>(null) }
     var promotableText by remember { mutableStateOf<String?>(null) }
-    var runError by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(runState?.promotableId) {
+        val id = runState?.promotableId
+        promotableText = if (id == null) null else withContext(Dispatchers.IO) {
+            val genome = host.store.load(id)
+            val report = host.store.report(id)
+            buildString {
+                append(genome?.label?.ifBlank { id } ?: id)
+                report?.let { append(" — %.0f%%".format(it.successRate * 100)) }
+            }
+        }
+    }
 
     fun modelLabel(choice: ChatModelChoice?): String {
         if (choice == null) return context.getString(R.string.recursive_harness_model_fallback)
@@ -90,6 +103,11 @@ internal fun RecursiveHarnessSection(container: AppContainer) {
 
     LaunchedEffect(host) { refresh() }
 
+    // The archive gains entries while a run is going; reload when it ends.
+    LaunchedEffect(runState?.running) {
+        if (runState?.running == false && runState != null) refresh()
+    }
+
     SettingsPanel(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text(stringResource(R.string.recursive_harness_title), style = MaterialTheme.typography.titleLarge)
@@ -110,6 +128,37 @@ internal fun RecursiveHarnessSection(container: AppContainer) {
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+
+            // The on/off switch: when on, the agent follows the active
+            // genome's instructions and enabled skills; when off, the agent
+            // behaves as shipped. Runs work either way — evolving only
+            // produces candidates, it never changes agent behavior by itself.
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(
+                        stringResource(R.string.recursive_harness_enabled),
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        stringResource(R.string.recursive_harness_enabled_description),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = evolveSettings.enabled,
+                    onCheckedChange = { checked ->
+                        val updated = evolveSettings.copy(enabled = checked)
+                        host.updateSettings(updated)
+                        evolveSettings = updated
+                    },
+                )
+            }
 
             // Role models: a real model per role, picked here. Unset means the
             // app's active provider and model, like the planner does.
@@ -138,6 +187,8 @@ internal fun RecursiveHarnessSection(container: AppContainer) {
             }
 
             // Run controls: one evolution run, then an approval card for the winner.
+            // The run lives in the host (app scope): leaving this screen does
+            // not stop it, and coming back shows its live state.
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -147,52 +198,11 @@ internal fun RecursiveHarnessSection(container: AppContainer) {
                         if (running) return@Button
                         val caller = host.modelCaller
                         if (caller == null) {
-                            runError = context.getString(R.string.recursive_harness_run_failed)
+                            localError = context.getString(R.string.recursive_harness_run_failed)
                             return@Button
                         }
-                        running = true
-                        runStatus = null
-                        promotableId = null
-                        promotableText = null
-                        runError = null
-                        scope.launch {
-                            val outcome = runCatching {
-                                withContext(Dispatchers.Default) {
-                                    val parent = host.store.active()?.let { host.store.load(it.genomeId) }
-                                        ?: host.store.load(Genome.baseline().id)
-                                        ?: host.store.save(Genome.baseline())
-                                    val result = host.newRun(caller, File(context.filesDir, "evolve/work"))
-                                        .run(parent, File(context.filesDir, "evolve/work"))
-                                    result to parent
-                                }
-                            }
-                            outcome.onSuccess { (result, _) ->
-                                val best = result.generations.flatMap { it.reports }.maxByOrNull { it.successRate }
-                                runStatus = buildString {
-                                    append(result.generations.size).append(" generation(s), ")
-                                    append(result.generations.sumOf { it.candidateIds.size }).append(" candidate(s)")
-                                    best?.let { append(", best %.0f%%".format(it.successRate * 100)) }
-                                    result.stoppedReason?.let { append(" — stopped: ").append(it) }
-                                    val failures = result.generations.flatMap { it.proposalFailures }
-                                    if (failures.isNotEmpty()) append(" — proposals failed: ").append(failures.joinToString("; ").take(200))
-                                }
-                                result.promotableId?.let { id ->
-                                    val genome = host.store.load(id)
-                                    val report = host.store.report(id)
-                                    promotableId = id
-                                    promotableText = buildString {
-                                        append(genome?.label?.ifBlank { id } ?: id)
-                                        report?.let { append(" — %.0f%%".format(it.successRate * 100)) }
-                                    }
-                                } ?: run {
-                                    runStatus = (runStatus ?: "") + " — " + context.getString(R.string.recursive_harness_no_candidate)
-                                }
-                                refresh()
-                            }.onFailure {
-                                runError = it.message ?: context.getString(R.string.recursive_harness_run_failed)
-                            }
-                            running = false
-                        }
+                        localError = null
+                        host.startRun(caller, File(context.filesDir, "evolve/work"))
                     },
                     enabled = !running,
                 ) {
@@ -201,15 +211,18 @@ internal fun RecursiveHarnessSection(container: AppContainer) {
                 if (running) {
                     CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
                     Text(stringResource(R.string.recursive_harness_running), style = MaterialTheme.typography.bodyMedium)
+                    TextButton(onClick = { host.cancelRun() }) {
+                        Text(stringResource(R.string.recursive_harness_stop))
+                    }
                 }
             }
-            runStatus?.let {
+            runState?.summary?.let {
                 Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            runError?.let {
+            (runState?.error ?: localError)?.let {
                 Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
             }
-            promotableId?.let { id ->
+            runState?.promotableId?.let { id ->
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
                         stringResource(R.string.recursive_harness_promotable),
@@ -230,19 +243,17 @@ internal fun RecursiveHarnessSection(container: AppContainer) {
                                     }
                                 }.getOrElse { Result.failure(it) }
                                 if (result.isSuccess) {
-                                    promotableId = null
-                                    promotableText = null
-                                    runStatus = null
+                                    host.dismissPromotable()
                                     refresh()
                                 } else {
-                                    runError = result.exceptionOrNull()?.message
+                                    localError = result.exceptionOrNull()?.message
                                         ?: context.getString(R.string.recursive_harness_run_failed)
                                 }
                             }
                         }) {
                             Text(stringResource(R.string.recursive_harness_promote))
                         }
-                        TextButton(onClick = { promotableId = null; promotableText = null }) {
+                        TextButton(onClick = { host.dismissPromotable() }) {
                             Text(stringResource(R.string.recursive_harness_dismiss))
                         }
                     }
