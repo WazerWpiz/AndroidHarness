@@ -14,4 +14,9 @@
     <string name="recursive_harness_dismiss" translatable="false">Dismiss</string>
     <string name="recursive_harness_no_candidate" translatable="false">No candidate met the promotion bar.</string>
     <string name="recursive_harness_run_failed" translatable="false">Run failed.</string>
+    <string name="recursive_harness_proposer" translatable="false">Proposer model</string>
+    <string name="recursive_harness_worker" translatable="false">Worker model</string>
+    <string name="recursive_harness_critic" translatable="false">Critic model</string>
+    <string name="recursive_harness_change" translatable="false">Change</string>
+    <string name="recursive_harness_model_fallback" translatable="false">Not set — uses the active model</string>
 </resources>

@@ -8,6 +8,7 @@ data class GenerationResult(
     val reports: List<EvalReport>,
     val promotableId: String?,
     val stoppedReason: String?,
+    val proposalFailures: List<String> = emptyList(),
 )
 
 data class RunResult(
@@ -17,81 +18,37 @@ data class RunResult(
 )
 
 /**
- * Runs generations end to end, without a model. Candidates come from
- * small template patches driven by the [TraceMiner] diagnosis: each one
- * changes exactly one small thing and records its hypothesis. Every
- * candidate is evaluated in a throwaway directory, archived, and only
- * the best one that meets the gate rule (minus approval) is returned as
- * promotable. Nothing here applies a genome: promotion is a UI action
- * behind an approval card.
+ * The real evolution loop, after the Darwin Gödel Machine
+ * (jennyzzt/dgm, `DGM_outer.py` + `self_improve_step.py`):
  *
- * The proposer is template-based for now: no model is called, so a run
- * is deterministic and costs no tokens. An LLM proposer that picks its
- * provider and model from the existing picker is the next step after
- * this runner proves itself.
+ * 1. Sample a parent from the archive, weighted by score and novelty
+ *    (`Archive.selectParent` — DGM's `score_child_prop`: accuracy
+ *    sigmoid times 1/(1+children), so the search keeps exploring new
+ *    branches instead of re-polishing the same winner).
+ * 2. Self-modify: the proposer model reads the parent, its failing
+ *    benchmark cases and the archive's stepping stones, and writes ONE
+ *    new genome. Invalid output produces no candidate — never a template.
+ * 3. Evaluate: the worker model, running under the candidate's
+ *    instructions and skills, does the live benchmark tasks in a scratch
+ *    workspace, with repair rounds and a critic check (Voyager's
+ *    iterative prompting + self-verification).
+ * 4. Archive the candidate with its report. Only the best candidate that
+ *    meets the gate rule (minus approval) is returned as promotable.
+ *    Nothing here applies a genome: promotion is a UI action behind an
+ *    approval card, and the model never touches the trusted core.
+ *
+ * If no model is configured for the proposer or the worker, the run
+ * refuses with [NoModelConfigured] instead of falling back to any fake
+ * score. The static suite is gone from this path: the score now measures
+ * what the candidate's instructions do to a real model's work.
  */
 class EvolutionRunner(
     private val store: GenomeStore,
     private val archive: Archive,
     private val ledger: BudgetLedger,
     private val settings: EvolveSettings,
+    private val caller: EvolveModelCaller,
 ) {
-    companion object {
-        private const val VERIFY_LINE = "Verify before claiming done: run the checks and quote their evidence."
-        private const val PINNED_LINE = "Keep pinned constraints in every summary: copy each pinned line verbatim."
-        private const val DEBUG_SKILL = "systematic-debugging"
-        private const val DEBUG_SKILL_TEXT = "---\nname: systematic-debugging\ndescription: Reproduce first, then fix.\n---\n\n# Systematic debugging\n\n1. Reproduce the failure.\n2. Narrow it to one change.\n3. Fix that change and re-run the check.\n"
-
-        /**
-         * At most [maxCandidates] template candidates, each one small change
-         * away from [parent]. Templates already satisfied by the parent are
-         * skipped, so a candidate always differs from its parent.
-         */
-        fun templateCandidates(parent: Genome, diagnosis: TraceMiner.Diagnosis, maxCandidates: Int = 4): List<Genome> {
-            val hints = diagnosis.suggestedHints.joinToString(" ").lowercase()
-            val candidates = mutableListOf<Genome>()
-            fun add(label: String, hypothesis: String, change: (Genome) -> Genome) {
-                if (candidates.size >= maxCandidates) return
-                candidates += change(parent).copy(
-                    parent = parent.id,
-                    createdAt = System.currentTimeMillis(),
-                    label = label,
-                    hypothesis = hypothesis,
-                    proposerNotes = diagnosis.topPatterns.joinToString("; ") { "${it.pattern} x${it.count}" }.take(500),
-                ).identified()
-            }
-            if (parent.instructions.none { "verify" in it.lowercase() }) {
-                add("gen-verify", "A verify-before-done line should stop claims without evidence.",
-                    { it.copy(instructions = it.instructions + VERIFY_LINE) })
-            }
-            if (parent.instructions.none { "pinned" in it.lowercase() }) {
-                add("gen-pinned", "A pinned-constraint line should keep pinned lines through compaction.",
-                    { it.copy(instructions = it.instructions + PINNED_LINE) })
-            }
-            if (DEBUG_SKILL !in parent.skills) {
-                add("gen-skill", "Restoring the systematic-debugging skill should fix the patch family.",
-                    { it.copy(skills = it.skills + (DEBUG_SKILL to DEBUG_SKILL_TEXT), skillEnable = it.skillEnable + DEBUG_SKILL) })
-            }
-            if (parent.hooks.isEmpty()) {
-                add("gen-hook", "A tool-failed hook should catch patch failures early.",
-                    { it.copy(hooks = it.hooks + GenomeHook("tool.failed", "apply_patch", "re-read the file and rebuild the hunk", 30)) })
-            } else {
-                val first = parent.hooks.first()
-                if (first.timeout > 30) {
-                    add("gen-hook", "A tighter hook timeout should stop slow hooks sooner.",
-                        { it.copy(hooks = listOf(first.copy(timeout = 30)) + it.hooks.drop(1)) })
-                }
-            }
-            if ("stale" in hints || "hunk" in hints) {
-                if (parent.instructions.none { "stale" in it.lowercase() }) {
-                    add("gen-hunk", "A stale-hunk note should help the agent recover instead of guessing.",
-                        { it.copy(instructions = it.instructions + "When a patch hunk is stale, re-read the file and rebuild the hunk instead of guessing.") })
-                }
-            }
-            return candidates
-        }
-    }
-
     /** The archive refuses a child whose parent it has never seen, so record the parent first. */
     private fun ensureParentArchived(parent: Genome) {
         if (archive.entries().any { it.genomeId == parent.id }) return
@@ -113,46 +70,66 @@ class EvolutionRunner(
         )
     }
 
-    fun runGeneration(parent: Genome, diagnosis: TraceMiner.Diagnosis, workDir: File): GenerationResult {
+    suspend fun runGeneration(parent: Genome, workDir: File): GenerationResult {
         ledger.stopReason()?.let { reason ->
             return GenerationResult(parent.id, emptyList(), emptyList(), null, reason)
         }
+        if (!caller.isConfigured(EvolveRole.PROPOSER)) throw NoModelConfigured(EvolveRole.PROPOSER)
+        if (!caller.isConfigured(EvolveRole.WORKER)) throw NoModelConfigured(EvolveRole.WORKER)
         ensureParentArchived(parent)
         val parentReport = store.report(parent.id)
-        val candidates = templateCandidates(parent, diagnosis, settings.maxCandidates)
+        val failures = mutableListOf<String>()
         val reports = mutableListOf<EvalReport>()
         val candidateIds = mutableListOf<String>()
         var best: Pair<Genome, EvalReport>? = null
-        for (candidate in candidates) {
-            if (ledger.shouldStop()) break
-            val stored = store.save(candidate)
-            candidateIds += stored.id
-            val evalDir = File(workDir, "eval-${stored.id}").apply { mkdirs() }
-            val report = EvalHarness.evaluate(stored, workDir = evalDir)
-            val violations = SafetyProbes.safetyViolations(stored, evalDir)
-            val finalReport = report.copy(safetyViolations = violations)
-            store.saveReport(finalReport)
-            reports += finalReport
-            if (archive.entries().none { it.genomeId == stored.id }) {
-                archive.add(
-                    ArchiveEntry(
-                        genomeId = stored.id,
-                        parent = parent.id,
-                        status = if (violations > 0) ArchiveStatus.VETOED else ArchiveStatus.EVALUATED,
-                        successRate = finalReport.successRate,
-                        holdoutScore = finalReport.holdoutScore,
-                        tokensPerSuccess = finalReport.tokensPerSuccess,
-                        safetyViolations = violations,
-                        label = stored.label,
-                        hypothesis = stored.hypothesis,
-                        createdAt = stored.createdAt,
-                    ),
-                )
-            }
-            ledger.consume(BudgetRole.WORKER, 0, finalReport.wallMs)
-            val decision = PromotionGate.wouldPromote(parentReport, finalReport, violations == 0, settings)
-            if (decision is GateDecision.Approved) {
-                if (best == null || finalReport.successRate > best.second.successRate) best = stored to finalReport
+        var attempts = 0
+        while (attempts < settings.maxCandidates && !ledger.shouldStop()) {
+            attempts++
+            val histories = archive.entries().mapNotNull { it.hypothesis.ifBlank { null } }
+            val hints = TraceMiner.mine(histories).suggestedHints
+            when (val proposed = LlmProposer.propose(
+                caller, parent, parentReport, archive.entries(), LiveEvaluator.proposerView().tasks, hints,
+            )) {
+                is LlmProposer.Proposed.Failed -> {
+                    failures += proposed.reason
+                    continue
+                }
+                is LlmProposer.Proposed.Candidate -> {
+                    if (!ledger.consume(BudgetRole.PROPOSER, proposed.promptTokens + proposed.completionTokens, 0)) {
+                        failures += "proposal tokens exceeded the budget"
+                        break
+                    }
+                    val stored = store.save(proposed.genome)
+                    candidateIds += stored.id
+                    val evalDir = File(workDir, "eval-${stored.id}").apply { mkdirs() }
+                    val (report, tokens) = LiveEvaluator.evaluate(stored, caller, evalDir)
+                    ledger.consume(BudgetRole.WORKER, tokens.first, report.wallMs)
+                    ledger.consume(BudgetRole.CRITIC, tokens.second, 0)
+                    val violations = SafetyProbes.safetyViolations(stored, evalDir)
+                    val finalReport = report.copy(safetyViolations = violations)
+                    store.saveReport(finalReport)
+                    reports += finalReport
+                    if (archive.entries().none { it.genomeId == stored.id }) {
+                        archive.add(
+                            ArchiveEntry(
+                                genomeId = stored.id,
+                                parent = parent.id,
+                                status = if (violations > 0) ArchiveStatus.VETOED else ArchiveStatus.EVALUATED,
+                                successRate = finalReport.successRate,
+                                holdoutScore = finalReport.holdoutScore,
+                                tokensPerSuccess = finalReport.tokensPerSuccess,
+                                safetyViolations = violations,
+                                label = stored.label,
+                                hypothesis = stored.hypothesis,
+                                createdAt = stored.createdAt,
+                            ),
+                        )
+                    }
+                    val decision = PromotionGate.wouldPromote(parentReport, finalReport, violations == 0, settings)
+                    if (decision is GateDecision.Approved) {
+                        if (best == null || finalReport.successRate > best.second.successRate) best = stored to finalReport
+                    }
+                }
             }
         }
         val improved = best != null && parentReport != null &&
@@ -164,27 +141,29 @@ class EvolutionRunner(
             reports = reports,
             promotableId = best?.first?.id,
             stoppedReason = ledger.stopReason(),
+            proposalFailures = failures,
         )
     }
 
     /**
-     * Runs up to [EvolveSettings.maxGenerations] generations. Each generation
-     * starts from the previous generation's best candidate when one exists.
-     * Returns the last promotable candidate found, if any; promotion itself
-     * stays a UI action behind an approval card.
+     * Runs up to [EvolveSettings.maxGenerations] generations. Each
+     * generation after the first samples its parent from the archive by
+     * score and novelty, like DGM. Returns the last promotable candidate
+     * found, if any; promotion itself stays a UI action behind an
+     * approval card.
      */
-    fun run(parent: Genome, workDir: File): RunResult {
+    suspend fun run(parent: Genome, workDir: File): RunResult {
+        if (!caller.isConfigured(EvolveRole.PROPOSER)) throw NoModelConfigured(EvolveRole.PROPOSER)
+        if (!caller.isConfigured(EvolveRole.WORKER)) throw NoModelConfigured(EvolveRole.WORKER)
         val generations = mutableListOf<GenerationResult>()
         var current = parent
         var promotableId: String? = null
         while (!ledger.shouldStop()) {
-            val histories = archive.entries().mapNotNull { it.hypothesis.ifBlank { null } } +
-                archive.entries().map { it.label }
-            val diagnosis = TraceMiner.mine(histories)
-            val result = runGeneration(current, diagnosis, workDir)
+            val result = runGeneration(current, workDir)
             generations += result
             promotableId = result.promotableId ?: promotableId
-            val next = result.promotableId?.let { store.load(it) } ?: break
+            val nextId = archive.selectParent(fitness = { it.successRate ?: 0.0 })?.genomeId ?: break
+            val next = store.load(nextId) ?: break
             if (next.id == current.id) break
             current = next
         }

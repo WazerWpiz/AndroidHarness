@@ -1,5 +1,6 @@
 package com.androidharness.app.evolve
 
+import com.androidharness.app.data.ChatModelChoice
 import kotlinx.serialization.Serializable
 
 /**
@@ -18,10 +19,16 @@ data class EvolveSettings(
     val minSuccessDelta: Double = 0.05,
     /** Tokens per success may not grow by more than this fraction. */
     val maxTokenRegression: Double = 0.15,
-    val workerModel: String? = null,
-    val proposerModel: String? = null,
-    val criticModel: String? = null,
+    /** Provider + model per role, exactly as the user picked them in Settings. Null means unconfigured. */
+    val workerModel: ChatModelChoice? = null,
+    val proposerModel: ChatModelChoice? = null,
+    val criticModel: ChatModelChoice? = null,
 ) {
+    fun choiceFor(role: EvolveRole): ChatModelChoice? = when (role) {
+        EvolveRole.WORKER -> workerModel
+        EvolveRole.PROPOSER -> proposerModel
+        EvolveRole.CRITIC -> criticModel
+    }
     /** Evaluation stays serial: this runs on a phone and the battery is the constraint. */
     val evalConcurrency: Int get() = 1
 

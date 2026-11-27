@@ -237,6 +237,7 @@ class AppContainer(val appContext: Context) {
     val fileHistory = com.androidharness.app.data.WorkspaceFileHistory(java.io.File(appContext.filesDir, "workspace-file-history"))
     // Genome data lives in app storage, not the project: it describes the harness, not a workspace.
     val evolveHost = com.androidharness.app.evolve.EvolveHost.at(java.io.File(appContext.filesDir, "evolve"))
+        .also { host -> host.modelCaller = com.androidharness.app.evolve.AppModelCaller(this, host::settings) }
     val checkpoints = CheckpointStore(db.dao(), fileHistory)
 
     val todoStore = TodoStore()

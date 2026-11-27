@@ -513,7 +513,7 @@ private fun SettingsScreenContent(
                                 onSearchChatChats = { value -> scope.launch { container.settings.setCodeSearchChatChats(value) } },
                             )
                             CodingSection { page -> openPage(page) }
-                            SettingsAnchor(R.string.recursive_harness_title) { RecursiveHarnessSection() }
+                            SettingsAnchor(R.string.recursive_harness_title) { RecursiveHarnessSection(container) }
                         }
                         SettingsPage.NINE_ROUTER -> NineRouterSection(container)
                         SettingsPage.CONNECTED_ACCOUNTS -> ConnectedAccountsSection(container)

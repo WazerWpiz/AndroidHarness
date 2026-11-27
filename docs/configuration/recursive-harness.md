@@ -117,7 +117,7 @@ The agent sees three read-only tools:
 | `evolve_history` | Archive entries, newest first, paginated |
 | `evolve_diff` | Field-level diff between two genome ids |
 | `evolve_propose` | Run one generation from the active genome (or the baseline) |
-| `evolve_evaluate` | Evaluate one stored genome on the static suite + safety probes |
+| `evolve_evaluate` | Evaluate one stored genome on the live suite + safety probes |
 
 `evolve_propose` and `evolve_evaluate` only write candidates, reports and
 archive entries. There is no `evolve_promote` tool, and there never will be:
@@ -126,32 +126,48 @@ harness, never something the agent can call.
 
 ## P1 — the runner (shipped)
 
-`EvolutionRunner` runs generations end to end. The proposer is
-template-based for now: each candidate changes exactly one small thing
-(a verify-before-done line, a pinned-constraint line, the
-systematic-debugging skill, a tool-failed hook), driven by the
-`TraceMiner` diagnosis of past failures. No model is called, so a run is
-deterministic and costs no tokens; an LLM proposer that picks its provider
-and model from the existing picker is the next step after this runner
-proves itself. Settings → Coding → Recursive harness has a Run button and
-an approval card: only a candidate that meets the gate rule
-(`PromotionGate.wouldPromote`, minus the approval) is offered, and
-tapping Promote is the only way a genome becomes active.
+`EvolutionRunner` runs generations end to end, after the Darwin Gödel
+Machine (`jennyzzt/dgm`, arXiv:2505.22954): sample a parent from the
+archive by score and novelty, self-modify, evaluate on a benchmark,
+archive the result. The proposer is a real foundation model
+(`LlmProposer`): it reads the parent genome, the parent's failing
+benchmark cases and the archive's stepping stones, and writes ONE new
+genome as JSON. Invalid output produces no candidate — never a template.
+Settings → Coding → Recursive harness has a Run button, three model
+pickers (proposer, worker, critic) and an approval card: only a
+candidate that meets the gate rule (`PromotionGate.wouldPromote`, minus
+the approval) is offered, and tapping Promote is the only way a genome
+becomes active. If no model is configured for the proposer or the
+worker, the run refuses instead of scoring anything fake.
 
 ## P2 — the evaluator (shipped)
 
-- `EvalHarness`: a deterministic static suite of 8 tasks, 2 seeds, one at a
-  time (6 training, 2 holdout). The proposer only ever sees training task
-  ids and titles; holdout is a scalar the proposer never sees.
+- `LiveEvaluator`: DGM's evaluation phase plus Voyager's iterative
+  prompting (`MineDojo/Voyager`). The worker model, running under the
+  candidate's instructions and enabled skills, does 8 live benchmark
+  tasks in a scratch workspace, with up to 3 repair rounds fed by the
+  checker's feedback. A fixed checker verifies the produced artifact,
+  and a separate critic model verifies it again. A task counts only
+  when the checker AND the critic pass. Two tasks are holdout: the
+  proposer never sees them, only their scalar score.
 - `SafetyProbes`: 6 trusted adversarial probes (read outside the workspace,
   write to a protected path, credential redaction, delete the workspace
   root, widen permissions, a hook touching safety machinery). Any single
   failure vetoes the candidate outright.
 - `BudgetLedger`: one token/wall/generation budget per run, enforced by the
-  trusted core; `consume` checks before it adds, so a budget can never
-  overshoot. Stagnation stops a run after the configured limit.
-- `TraceMiner`: mines counted failure patterns from redacted run history;
-  only counted phrases come out, never raw traces or secrets.
+  trusted core from provider-reported usage counts; `consume` checks before
+  it adds, so a budget can never overshoot. Stagnation stops a run after the
+  configured limit.
+- `TraceMiner`: mines counted failure patterns from redacted run history
+  and feeds them to the proposer as recurring hints; only counted
+  phrases come out, never raw traces or secrets.
+
+Honest limit: a phone has no Docker and cannot run SWE-bench, so the
+benchmark is 8 small local tasks with fixed checkers plus a critic —
+the same loop mechanics as DGM (archive → self-modify → empirical
+validation → promote on merit), phone-scale benchmark. The score
+measures what a candidate's instructions do to a real model's work:
+the harness never computes the answer itself.
 
 ## Safety model
 

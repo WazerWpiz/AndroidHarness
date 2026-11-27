@@ -16,10 +16,26 @@ import java.io.File
 class EvolveHost(val store: GenomeStore, val archive: Archive) {
 
     val gate = PromotionGate(store, archive)
-    val settings = EvolveSettings.DEFAULT.normalized()
+    private val settingsStore = EvolveSettingsStore.at(store.root)
+
+    /** Caps and role models, persisted under the evolve directory. */
+    var settings: EvolveSettings = settingsStore.load()
+        private set
+
+    /**
+     * The real model caller, wired by the app (HarnessApp) once. Null in
+     * unit tests and before the app wires it; the runner refuses to run
+     * without one instead of scoring anything fake.
+     */
+    var modelCaller: EvolveModelCaller? = null
+
+    fun updateSettings(settings: EvolveSettings) {
+        this.settings = settings.normalized()
+        settingsStore.save(this.settings)
+    }
 
     /** A fresh runner with a budget built from the caps: one run, one ledger. */
-    fun newRun(workDir: File = File(store.root, "work")): EvolutionRunner {
+    fun newRun(caller: EvolveModelCaller, workDir: File = File(store.root, "work")): EvolutionRunner {
         val ledger = BudgetLedger(
             maxTokens = settings.tokenBudget,
             maxWallMs = settings.maxWallMinutes * 60_000L,
@@ -27,7 +43,7 @@ class EvolveHost(val store: GenomeStore, val archive: Archive) {
             maxCandidates = settings.maxCandidates,
             stagnationLimit = settings.stagnationsBeforeStop,
         )
-        return EvolutionRunner(store, archive, ledger, settings)
+        return EvolutionRunner(store, archive, ledger, settings, caller)
     }
 
     fun tools(): List<Tool> = listOf(
