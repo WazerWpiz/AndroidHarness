@@ -11,6 +11,7 @@ import com.androidharness.app.llm.ProviderFactory
 import com.androidharness.app.llm.RequestOptions
 import com.androidharness.app.llm.StreamEvent
 import com.androidharness.app.llm.effectiveApiKey
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.first
 
 /**
@@ -95,6 +96,9 @@ class AppModelCaller(
                     else -> Unit
                 }
             }
+        } catch (e: CancellationException) {
+            // Never wrap cancellation as a model failure: the run must stop.
+            throw e
         } catch (e: ModelCallFailed) {
             throw e
         } catch (e: Exception) {

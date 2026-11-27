@@ -1,5 +1,6 @@
 package com.androidharness.app.evolve
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.Json
 
 /**
@@ -100,6 +101,10 @@ Genome schema:
     ): Proposed {
         val result = try {
             caller.complete(EvolveRole.PROPOSER, SYSTEM, promptFor(parent, parentReport, archive, trainingTasks, recurringHints))
+        } catch (e: CancellationException) {
+            // Never swallow cancellation: a stopped run must stop, not burn
+            // its remaining attempts as proposal failures.
+            throw e
         } catch (e: Exception) {
             return Proposed.Failed("proposer model call failed: ${e.message}")
         }

@@ -1,6 +1,7 @@
 package com.androidharness.app.evolve
 
 import java.io.File
+import kotlinx.coroutines.CancellationException
 
 /** What the proposer is allowed to see: training task ids and titles only. */
 data class EvalTaskSummary(val id: String, val title: String, val isHoldout: Boolean)
@@ -215,6 +216,8 @@ object LiveEvaluator {
                 "Task: ${task.title}\n${task.prompt}\n\nBefore:\n$before\n\nAfter (what the worker produced):\n$after",
                 maxOutputTokens = 512,
             )
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             return Triple(false, "critic call failed: ${e.message}", 0L to 0L)
         }
@@ -252,6 +255,8 @@ object LiveEvaluator {
                 }
                 val call = try {
                     caller.complete(EvolveRole.WORKER, workerSystem(genome), user)
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (e: Exception) {
                     reason = "worker call failed: ${e.message}"
                     break
