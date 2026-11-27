@@ -116,9 +116,42 @@ The agent sees three read-only tools:
 | `evolve_status` | Active genome, archive size, caps, and what never changes |
 | `evolve_history` | Archive entries, newest first, paginated |
 | `evolve_diff` | Field-level diff between two genome ids |
+| `evolve_propose` | Run one generation from the active genome (or the baseline) |
+| `evolve_evaluate` | Evaluate one stored genome on the static suite + safety probes |
 
-`evolve_propose` and `evolve_evaluate` arrive with the runner and always need an approval
-card. There is no `evolve_promote` tool, and there never will be.
+`evolve_propose` and `evolve_evaluate` only write candidates, reports and
+archive entries. There is no `evolve_promote` tool, and there never will be:
+promotion is a tap on the approval card in Settings → Coding → Recursive
+harness, never something the agent can call.
+
+## P1 — the runner (shipped)
+
+`EvolutionRunner` runs generations end to end. The proposer is
+template-based for now: each candidate changes exactly one small thing
+(a verify-before-done line, a pinned-constraint line, the
+systematic-debugging skill, a tool-failed hook), driven by the
+`TraceMiner` diagnosis of past failures. No model is called, so a run is
+deterministic and costs no tokens; an LLM proposer that picks its provider
+and model from the existing picker is the next step after this runner
+proves itself. Settings → Coding → Recursive harness has a Run button and
+an approval card: only a candidate that meets the gate rule
+(`PromotionGate.wouldPromote`, minus the approval) is offered, and
+tapping Promote is the only way a genome becomes active.
+
+## P2 — the evaluator (shipped)
+
+- `EvalHarness`: a deterministic static suite of 8 tasks, 2 seeds, one at a
+  time (6 training, 2 holdout). The proposer only ever sees training task
+  ids and titles; holdout is a scalar the proposer never sees.
+- `SafetyProbes`: 6 trusted adversarial probes (read outside the workspace,
+  write to a protected path, credential redaction, delete the workspace
+  root, widen permissions, a hook touching safety machinery). Any single
+  failure vetoes the candidate outright.
+- `BudgetLedger`: one token/wall/generation budget per run, enforced by the
+  trusted core; `consume` checks before it adds, so a budget can never
+  overshoot. Stagnation stops a run after the configured limit.
+- `TraceMiner`: mines counted failure patterns from redacted run history;
+  only counted phrases come out, never raw traces or secrets.
 
 ## Safety model
 

@@ -7,4 +7,11 @@
     <string name="recursive_harness_caps" translatable="false">A run may take 3 generations and 4 candidates each, within 30 minutes and 250,000 tokens, one evaluation at a time. A genome that fails a safety probe is vetoed and cannot be promoted.</string>
     <string name="recursive_harness_empty" translatable="false">No genomes have been archived. Candidates appear here after an evaluation.</string>
     <string name="recursive_harness_rule" translatable="false">Weights are never modified. Safety checks are never evolved.</string>
+    <string name="recursive_harness_run" translatable="false">Run one evolution</string>
+    <string name="recursive_harness_running" translatable="false">Running…</string>
+    <string name="recursive_harness_promotable" translatable="false">Ready to promote</string>
+    <string name="recursive_harness_promote" translatable="false">Promote</string>
+    <string name="recursive_harness_dismiss" translatable="false">Dismiss</string>
+    <string name="recursive_harness_no_candidate" translatable="false">No candidate met the promotion bar.</string>
+    <string name="recursive_harness_run_failed" translatable="false">Run failed.</string>
 </resources>

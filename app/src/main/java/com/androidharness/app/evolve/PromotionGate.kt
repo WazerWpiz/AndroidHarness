@@ -8,12 +8,53 @@ package com.androidharness.app.evolve
  * re-validated here, including its protected-path scan, so one stored before a rule
  * changed cannot be promoted afterwards. Rollback restores the exact previous hash.
  */
+/** The gate's verdict without an approval: whether a candidate *could* be promoted. */
+sealed interface GateDecision {
+    data object Approved : GateDecision
+    data class Rejected(val reason: String) : GateDecision
+}
+
 class PromotionGate(private val store: GenomeStore, private val archive: Archive? = null) {
 
     /** Created by the approval card, never by a genome, a hook or the agent. */
     data class Approval(val approvedBy: String, val approvedAt: Long = System.currentTimeMillis()) {
         init {
             require(approvedBy.isNotBlank()) { "An approval needs the person who gave it." }
+        }
+    }
+
+    companion object {
+        /**
+         * The promotion rule, minus the approval: a candidate must be clean
+         * on safety, beat its baseline by at least [EvolveSettings.minSuccessDelta],
+         * and not regress tokens per success by more than
+         * [EvolveSettings.maxTokenRegression]. With no baseline yet, any clean
+         * candidate that scores above zero qualifies. The actual promotion
+         * still needs an [Approval] through [promote].
+         */
+        fun wouldPromote(
+            baseline: EvalReport?,
+            candidate: EvalReport,
+            safetyClean: Boolean,
+            settings: EvolveSettings,
+        ): GateDecision {
+            if (!safetyClean || candidate.safetyViolations > 0) {
+                return GateDecision.Rejected("candidate has safety violations")
+            }
+            if (baseline == null) {
+                return if (candidate.successRate > 0.0) GateDecision.Approved
+                else GateDecision.Rejected("candidate scores nothing")
+            }
+            val delta = candidate.successRate - baseline.successRate
+            if (delta < settings.minSuccessDelta) {
+                return GateDecision.Rejected("improvement %.1f points is below the %.1f-point bar".format(delta * 100, settings.minSuccessDelta * 100))
+            }
+            if (baseline.tokensPerSuccess > 0.0 &&
+                candidate.tokensPerSuccess > baseline.tokensPerSuccess * (1.0 + settings.maxTokenRegression)
+            ) {
+                return GateDecision.Rejected("tokens per success regressed beyond the allowed %.0f%%".format(settings.maxTokenRegression * 100))
+            }
+            return GateDecision.Approved
         }
     }
 

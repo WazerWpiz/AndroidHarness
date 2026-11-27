@@ -1,13 +1,21 @@
 package com.androidharness.app.tools
 
+import com.androidharness.app.evolve.EvalHarness
 import com.androidharness.app.evolve.EvolveHost
+import com.androidharness.app.evolve.Genome
+import com.androidharness.app.evolve.TraceMiner
+import java.io.File
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
 /**
- * Read-only tools for the recursive harness. There is deliberately no `evolve_promote`:
- * promotion is a settings action behind an approval card, never something the agent can
- * call. Propose and evaluate arrive with the runner; until then these three only report.
+ * Read-only tools for the recursive harness, plus propose and evaluate
+ * from the runner. There is deliberately no `evolve_promote`: promotion
+ * is a settings action behind an approval card, never something the agent
+ * can call. Propose and evaluate only write candidates, reports and
+ * archive entries; nothing they do can make a genome active.
  */
 internal abstract class EvolveReadTool(protected val host: EvolveHost) : Tool {
     override val isReadOnly = true
@@ -99,5 +107,79 @@ internal class EvolveDiffTool(host: EvolveHost) : EvolveReadTool(host) {
         val from = host.store.load(fromId) ?: return ToolResult(false, "Genome $fromId is not stored.")
         val to = host.store.load(toId) ?: return ToolResult(false, "Genome $toId is not stored.")
         return ToolResult(true, "Genome $fromId -> $toId\n" + from.diff(to))
+    }
+}
+
+internal class EvolveProposeTool(host: EvolveHost) : EvolveReadTool(host) {
+    override val name = "evolve_propose"
+    override val isReadOnly = false
+    override val description =
+        "Run one evolution generation from the active genome (or the shipped baseline): " +
+            "propose template candidates, evaluate them on the static suite, run the safety " +
+            "probes and archive the results. Returns the candidate ids and the one that " +
+            "could be promoted. Never promotes: promotion is a settings action behind an " +
+            "approval card, never something the agent can call."
+    override val parametersSchema = Schema.obj(emptyMap())
+
+    override suspend fun execute(args: JsonObject, ctx: ToolContext): ToolResult = withContext(Dispatchers.IO) {
+        val host = this@EvolveProposeTool.host
+        val parent = host.store.active()?.let { host.store.load(it.genomeId) }
+            ?: host.store.load(Genome.baseline().id)
+            ?: host.store.save(Genome.baseline())
+        val histories = host.archive.entries().mapNotNull { it.hypothesis.ifBlank { null } }
+        val diagnosis = TraceMiner.mine(histories)
+        val workDir = File(host.store.root, "work").apply { mkdirs() }
+        val result = host.newRun(workDir).runGeneration(parent, diagnosis, workDir)
+        val text = buildString {
+            append("Generation from parent ${parent.id} (${parent.label.ifBlank { "unnamed" }}): ")
+            append(result.candidateIds.size).append(" candidates")
+            if (result.reports.isNotEmpty()) {
+                append(", best ")
+                val best = result.reports.maxByOrNull { it.successRate }
+                append("%.0f%%".format((best?.successRate ?: 0.0) * 100))
+            }
+            result.promotableId?.let { append("\nPromotable (needs your approval in Settings): ").append(it) }
+                ?: append("\nNo candidate met the promotion bar.")
+            result.stoppedReason?.let { append("\nStopped: ").append(it) }
+        }
+        ToolResult(true, text)
+    }
+}
+
+internal class EvolveEvaluateTool(host: EvolveHost) : EvolveReadTool(host) {
+    override val name = "evolve_evaluate"
+    override val isReadOnly = false
+    override val description =
+        "Evaluate one stored genome on the static suite (8 tasks, 2 seeds) and run the " +
+            "safety probes. Saves the report and returns the score. Never promotes."
+    override val parametersSchema = Schema.obj(
+        mapOf("genome_id" to Schema.string("The stored genome id to evaluate.")),
+        required = listOf("genome_id"),
+    )
+
+    override suspend fun execute(args: JsonObject, ctx: ToolContext): ToolResult = withContext(Dispatchers.IO) {
+        val host = this@EvolveEvaluateTool.host
+        val genomeId = args["genome_id"]?.jsonPrimitive?.content?.trim().orEmpty()
+        if (genomeId.isBlank()) return@withContext ToolResult(false, "genome_id is required.")
+        val genome = host.store.load(genomeId) ?: return@withContext ToolResult(false, "Genome $genomeId is not stored.")
+        val workDir = File(host.store.root, "work").apply { mkdirs() }
+        val evalDir = File(workDir, "eval-$genomeId").apply { mkdirs() }
+        val report = EvalHarness.evaluate(genome, workDir = evalDir)
+        val violations = com.androidharness.app.evolve.SafetyProbes.safetyViolations(genome, evalDir)
+        val final = report.copy(safetyViolations = violations)
+        host.store.saveReport(final)
+        val failed = final.tasks.filter { !it.passed }
+        val text = buildString {
+            append("Genome $genomeId: %.0f%%".format(final.successRate * 100))
+            append(" success (${final.tasks.count { it.passed }}/${final.tasks.size} tasks)")
+            final.holdoutScore?.let { append(", holdout %.0f%%".format(it * 100)) }
+            append(", $violations safety violations")
+            if (failed.isNotEmpty()) {
+                append("\nFailed:")
+                failed.forEach { append("\n- ").append(it.taskId).append(": ").append(it.detail) }
+            }
+            if (violations > 0) append("\nVetoed: a candidate with safety violations cannot be promoted.")
+        }
+        ToolResult(true, text)
     }
 }
