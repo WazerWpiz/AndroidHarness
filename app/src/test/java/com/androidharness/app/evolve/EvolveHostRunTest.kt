@@ -70,21 +70,23 @@ class EvolveHostRunTest {
     }
 
     @Test
-    fun `a second start while a run is going is refused, and cancel stops the run`() = runBlocking {
-        host.store.save(Genome.baseline())
-        val latch = CompletableDeferred<Unit>()
-        val caller = LatchModelCaller(latch)
-        assertTrue(host.startRun(caller, File(root, "work")))
-        withTimeout(30_000) {
-            host.runState.first { it != null && it.running }
+    fun `a second start while a run is going is refused, and cancel stops the run`() {
+        runBlocking {
+            host.store.save(Genome.baseline())
+            val latch = CompletableDeferred<Unit>()
+            val caller = LatchModelCaller(latch)
+            assertTrue(host.startRun(caller, File(root, "work")))
+            withTimeout(30_000) {
+                host.runState.first { it != null && it.running }
+            }
+            assertFalse(host.startRun(caller, File(root, "work")))
+            host.cancelRun()
+            awaitSettled()
+            val state = host.runState.value
+            assertNotNull(state)
+            assertFalse(state!!.running)
+            assertTrue(state.summary!!.contains("stopped"))
+            latch.complete(Unit)
         }
-        assertFalse(host.startRun(caller, File(root, "work")))
-        host.cancelRun()
-        awaitSettled()
-        val state = host.runState.value
-        assertNotNull(state)
-        assertFalse(state!!.running)
-        assertTrue(state.summary!!.contains("stopped"))
-        latch.complete(Unit)
     }
 }
