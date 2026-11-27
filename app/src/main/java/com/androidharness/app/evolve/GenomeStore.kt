@@ -96,10 +96,15 @@ class GenomeStore(val root: File) {
         return active.takeIf { load(it.genomeId) != null }
     }
 
-    /** Point the harness at [genomeId]. Only [PromotionGate] calls this, after an approval. */
+    /** Point the harness at [genomeId]. Only [PromotionGate] calls this, after an approval.
+     * Activating a genome that was never stored must never crash and must never leave a
+     * dangling pointer: the active pointer is cleared instead. */
     @Synchronized
     internal fun activate(genomeId: String, previous: String?, at: Long, approvedBy: String) {
-        require(load(genomeId) != null) { "Genome $genomeId is not stored." }
+        if (load(genomeId) == null) {
+            activeFile.delete()
+            return
+        }
         ProtectedPaths.requireWritable(activeFile.invariantSeparatorsPath)
         EvolveIo.write(activeFile, json.encodeToString(ActiveGenome.serializer(),
             ActiveGenome(genomeId, previous, at, approvedBy)))

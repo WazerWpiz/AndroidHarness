@@ -226,7 +226,11 @@ dependencies {
     // material-kolor 5.0.1's Android AAR no longer ships com.materialkolor.quantize /
     // com.materialkolor.score (used by HarnessCanvasStore for the canvas seed);
     // they moved to the material-color-utilities artifact.
-    implementation("com.materialkolor:material-color-utilities:6.1.0")
+    // Must stay 5.0.1, matching material-kolor 5.0.1: 6.1.0 drops
+    // com.materialkolor.scheme.DynamicScheme, which dynamicColorScheme() needs at
+    // runtime — compile passes, but PersonalThemeTest then dies with
+    // NoClassDefFoundError at CustomThemePalette.colorScheme().
+    implementation("com.materialkolor:material-color-utilities:5.0.1")
     implementation(libs.compose.material.icons.extended)
     debugImplementation(libs.compose.ui.tooling)
 

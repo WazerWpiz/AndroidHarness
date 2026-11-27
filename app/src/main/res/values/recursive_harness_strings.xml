@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="recursive_harness_title">Recursive harness</string>
-    <string name="recursive_harness_description">The model stays frozen while the harness around it evolves. Each generation proposes a small change to instructions, skills, hooks or agent profiles, scores it against a fixed task suite, and waits for your approval before it becomes the baseline. Every step is readable, diffable and reversible.</string>
-    <string name="recursive_harness_active">Active genome</string>
-    <string name="recursive_harness_none">None yet. The harness runs with the genome that shipped.</string>
-    <string name="recursive_harness_caps">A run may take 3 generations and 4 candidates each, within 30 minutes and 250,000 tokens, one evaluation at a time. A genome that fails a safety probe is vetoed and cannot be promoted.</string>
-    <string name="recursive_harness_empty">No genomes have been archived. Candidates appear here after an evaluation.</string>
-    <string name="recursive_harness_rule">Weights are never modified. Safety checks are never evolved.</string>
+    <string name="recursive_harness_title" translatable="false">Recursive harness</string>
+    <string name="recursive_harness_description" translatable="false">The model stays frozen while the harness around it evolves. Each generation proposes a small change to instructions, skills, hooks or agent profiles, scores it against a fixed task suite, and waits for your approval before it becomes the baseline. Every step is readable, diffable and reversible.</string>
+    <string name="recursive_harness_active" translatable="false">Active genome</string>
+    <string name="recursive_harness_none" translatable="false">None yet. The harness runs with the genome that shipped.</string>
+    <string name="recursive_harness_caps" translatable="false">A run may take 3 generations and 4 candidates each, within 30 minutes and 250,000 tokens, one evaluation at a time. A genome that fails a safety probe is vetoed and cannot be promoted.</string>
+    <string name="recursive_harness_empty" translatable="false">No genomes have been archived. Candidates appear here after an evaluation.</string>
+    <string name="recursive_harness_rule" translatable="false">Weights are never modified. Safety checks are never evolved.</string>
 </resources>

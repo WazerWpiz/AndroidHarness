@@ -33,7 +33,9 @@ class PromotionGateTest {
 
     @Test
     fun `promotion needs an approval value, and the gate exposes no overload without one`() {
-        val promoteMethods = PromotionGate::class.java.methods.filter { it.name == "promote" }
+        // promote() returns kotlin.Result, so the Kotlin compiler mangles its JVM name
+        // to "promote-<hash>"; match the mangled name too, or reflection finds nothing.
+        val promoteMethods = PromotionGate::class.java.methods.filter { it.name == "promote" || it.name.startsWith("promote-") }
         assertTrue(promoteMethods.isNotEmpty())
         assertTrue(promoteMethods.all { method -> method.parameterTypes.contains(PromotionGate.Approval::class.java) })
         val result = runCatching { PromotionGate.Approval(" ") }
