@@ -30,4 +30,14 @@
     <string name="recursive_harness_import_refused" translatable="false">Refused: %1$s</string>
     <string name="recursive_harness_backup_failed" translatable="false">Backup failed: %1$s</string>
     <string name="recursive_harness_backup_open_failed" translatable="false">Could not open the file.</string>
+    <string name="recursive_harness_progress_generation" translatable="false">Generation %1$d of %2$d</string>
+    <string name="recursive_harness_progress_proposing" translatable="false">Proposing a candidate…</string>
+    <string name="recursive_harness_progress_evaluating" translatable="false">Evaluating…</string>
+    <string name="recursive_harness_progress_scoring" translatable="false">Scoring…</string>
+    <string name="recursive_harness_progress_candidate" translatable="false">Candidate %1$d of %2$d</string>
+    <string name="recursive_harness_progress_tokens" translatable="false">Tokens %1$d / %2$d</string>
+    <string name="recursive_harness_progress_elapsed" translatable="false">Elapsed %1$s</string>
+    <string name="recursive_harness_progress_failures" translatable="false">Proposal failures: %1$d</string>
+    <string name="recursive_harness_progress_last_failure" translatable="false">Last failure: %1$s</string>
+    <string name="recursive_harness_progress_finished" translatable="false">Finished candidates</string>
 </resources>

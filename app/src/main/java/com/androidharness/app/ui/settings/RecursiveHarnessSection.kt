@@ -34,6 +34,7 @@ import com.androidharness.app.R
 import com.androidharness.app.data.ChatModelChoice
 import com.androidharness.app.evolve.ArchiveEntry
 import com.androidharness.app.evolve.EvolveRole
+import com.androidharness.app.evolve.EvolveRunPhase
 import com.androidharness.app.evolve.GenomeBackup
 import com.androidharness.app.evolve.PromotionGate
 import com.androidharness.app.llm.effectiveApiKey
@@ -44,6 +45,7 @@ import java.util.Date
 import java.util.Locale
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -115,6 +117,18 @@ internal fun RecursiveHarnessSection(container: AppContainer) {
     // The archive gains entries while a run is going; reload when it ends.
     LaunchedEffect(runState?.running) {
         if (runState?.running == false && runState != null) refresh()
+    }
+
+    // Live progress (P6): the elapsed clock ticks once a second from the
+    // run's start, which the host records; nothing here is estimated.
+    var elapsedSeconds by remember { mutableStateOf(0L) }
+    LaunchedEffect(running, runState?.startedAtMs) {
+        val start = runState?.startedAtMs
+        if (!running || start == null) return@LaunchedEffect
+        while (true) {
+            elapsedSeconds = (System.currentTimeMillis() - start) / 1000
+            delay(1000)
+        }
     }
 
     // Backup (P5): one JSON file with every genome, its report, the
@@ -301,6 +315,106 @@ internal fun RecursiveHarnessSection(container: AppContainer) {
             }
             runState?.summary?.let {
                 Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            // Live progress (P6): shown only while the run is going, from
+            // the host's state — so leaving Settings and coming back shows
+            // the same live state. Counts and the current phase only: no
+            // percent-complete and no ETA, because the total work is not
+            // knowable in advance (budget, stagnation and quota can stop a
+            // run early). The final summary above stays once it finishes.
+            if (running) {
+                runState?.let { progress ->
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(
+                            buildString {
+                                append(
+                                    context.getString(
+                                        R.string.recursive_harness_progress_generation,
+                                        progress.generation, progress.maxGenerations,
+                                    ),
+                                )
+                                append(" · ")
+                                append(
+                                    when (progress.phase) {
+                                        EvolveRunPhase.PROPOSING -> context.getString(R.string.recursive_harness_progress_proposing)
+                                        EvolveRunPhase.EVALUATING -> context.getString(R.string.recursive_harness_progress_evaluating)
+                                        EvolveRunPhase.SCORING -> context.getString(R.string.recursive_harness_progress_scoring)
+                                        EvolveRunPhase.DONE, null -> context.getString(R.string.recursive_harness_progress_proposing)
+                                    },
+                                )
+                            },
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Text(
+                            buildString {
+                                append(
+                                    context.getString(
+                                        R.string.recursive_harness_progress_candidate,
+                                        progress.candidateIndex.coerceAtLeast(1), progress.maxCandidates,
+                                    ),
+                                )
+                                val name = progress.candidateLabel?.ifBlank { null } ?: progress.candidateId
+                                if (name != null) {
+                                    append(" · ").append(name)
+                                }
+                            },
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Text(
+                            buildString {
+                                append(
+                                    context.getString(
+                                        R.string.recursive_harness_progress_tokens,
+                                        progress.tokensUsed, progress.tokenBudget,
+                                    ),
+                                )
+                                append(" · ")
+                                append(
+                                    context.getString(
+                                        R.string.recursive_harness_progress_elapsed,
+                                        "%02d:%02d".format(elapsedSeconds / 60, elapsedSeconds % 60),
+                                    ),
+                                )
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        if (progress.proposalFailures > 0) {
+                            Text(
+                                buildString {
+                                    append(
+                                        context.getString(
+                                            R.string.recursive_harness_progress_failures,
+                                            progress.proposalFailures,
+                                        ),
+                                    )
+                                    progress.lastFailureReason?.let {
+                                        append(" — ")
+                                        append(context.getString(R.string.recursive_harness_progress_last_failure, it))
+                                    }
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        if (progress.finishedCandidates.isNotEmpty()) {
+                            Text(
+                                stringResource(R.string.recursive_harness_progress_finished),
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            progress.finishedCandidates.forEach { finished ->
+                                Text(
+                                    "${finished.label.ifBlank { finished.genomeId }} — ${"%.0f%%".format(finished.successRate * 100)}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
+                }
             }
             (runState?.error ?: localError)?.let {
                 Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)

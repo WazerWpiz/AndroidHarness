@@ -48,7 +48,39 @@ class EvolutionRunner(
     private val ledger: BudgetLedger,
     private val settings: EvolveSettings,
     private val caller: EvolveModelCaller,
+    /** Live progress (P6): called at each real transition. No-op by default; emits only, never scores. */
+    private val onProgress: (EvolveRunProgress) -> Unit = {},
 ) {
+    /** Candidates finished so far in this run, in completion order. */
+    private val finishedCandidates = mutableListOf<FinishedCandidate>()
+
+    /** One cheap progress snapshot from the facts the runner knows right now. */
+    private fun emitProgress(
+        phase: EvolveRunPhase,
+        generation: Int,
+        candidateIndex: Int,
+        candidateId: String?,
+        candidateLabel: String?,
+        failures: List<String>,
+    ) {
+        onProgress(
+            EvolveRunProgress(
+                phase = phase,
+                generation = generation,
+                maxGenerations = settings.maxGenerations,
+                candidateIndex = candidateIndex,
+                maxCandidates = settings.maxCandidates,
+                candidateId = candidateId,
+                candidateLabel = candidateLabel,
+                // Small fixed-size snapshot: the most recent candidates only.
+                finishedCandidates = finishedCandidates.takeLast(settings.maxCandidates),
+                tokensUsed = ledger.tokensUsed,
+                tokenBudget = ledger.maxTokens,
+                proposalFailures = failures.size,
+                lastFailureReason = failures.lastOrNull()?.take(200),
+            ),
+        )
+    }
     /** The archive refuses a child whose parent it has never seen, so record the parent first. */
     private fun ensureParentArchived(parent: Genome) {
         if (archive.entries().any { it.genomeId == parent.id }) return
@@ -70,7 +102,7 @@ class EvolutionRunner(
         )
     }
 
-    suspend fun runGeneration(parent: Genome, workDir: File): GenerationResult {
+    suspend fun runGeneration(parent: Genome, workDir: File, generation: Int = 1): GenerationResult {
         ledger.stopReason()?.let { reason ->
             return GenerationResult(parent.id, emptyList(), emptyList(), null, reason)
         }
@@ -88,6 +120,7 @@ class EvolutionRunner(
         val trainingTasks = LiveEvaluator.proposerView().tasks + RealProjectEvaluator.proposerView().tasks
         while (attempts < settings.maxCandidates && !ledger.shouldStop()) {
             attempts++
+            emitProgress(EvolveRunPhase.PROPOSING, generation, attempts, null, null, failures)
             val histories = archive.entries().mapNotNull { it.hypothesis.ifBlank { null } }
             val hints = TraceMiner.mine(histories).suggestedHints
             when (val proposed = LlmProposer.propose(
@@ -95,15 +128,18 @@ class EvolutionRunner(
             )) {
                 is LlmProposer.Proposed.Failed -> {
                     failures += proposed.reason
+                    emitProgress(EvolveRunPhase.PROPOSING, generation, attempts, null, null, failures)
                     continue
                 }
                 is LlmProposer.Proposed.Candidate -> {
                     if (!ledger.consume(BudgetRole.PROPOSER, proposed.promptTokens + proposed.completionTokens, 0)) {
                         failures += "proposal tokens exceeded the budget"
+                        emitProgress(EvolveRunPhase.PROPOSING, generation, attempts, null, null, failures)
                         break
                     }
                     val stored = store.save(proposed.genome)
                     candidateIds += stored.id
+                    emitProgress(EvolveRunPhase.EVALUATING, generation, attempts, stored.id, stored.label, failures)
                     val evalDir = File(workDir, "eval-${stored.id}").apply { mkdirs() }
                     val (liveReport, liveTokens) = LiveEvaluator.evaluate(stored, caller, evalDir)
                     val (realReport, realTokens) = RealProjectEvaluator.evaluate(
@@ -136,6 +172,8 @@ class EvolutionRunner(
                     if (decision is GateDecision.Approved) {
                         if (best == null || finalReport.successRate > best.second.successRate) best = stored to finalReport
                     }
+                    finishedCandidates += FinishedCandidate(stored.id, stored.label, finalReport.successRate)
+                    emitProgress(EvolveRunPhase.SCORING, generation, attempts, stored.id, stored.label, failures)
                 }
             }
         }
@@ -196,11 +234,12 @@ class EvolutionRunner(
     suspend fun run(parent: Genome, workDir: File): RunResult {
         if (!caller.isConfigured(EvolveRole.PROPOSER)) throw NoModelConfigured(EvolveRole.PROPOSER)
         if (!caller.isConfigured(EvolveRole.WORKER)) throw NoModelConfigured(EvolveRole.WORKER)
+        finishedCandidates.clear()
         val generations = mutableListOf<GenerationResult>()
         var current = parent
         var promotableId: String? = null
         while (!ledger.shouldStop()) {
-            val result = runGeneration(current, workDir)
+            val result = runGeneration(current, workDir, generations.size + 1)
             generations += result
             promotableId = result.promotableId ?: promotableId
             val nextId = archive.selectParent(fitness = { it.successRate ?: 0.0 })?.genomeId ?: break

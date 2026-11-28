@@ -280,6 +280,28 @@ Import refuses files larger than 16 MB before reading them fully, and a
 malformed file is refused with a clear message. The backup is a snapshot:
 genomes evaluated after the export are not in it.
 
+## P6 — live run progress (shipped)
+
+A run used to show nothing but "Running…" until it finished. The
+runner now reports each real transition to the screen, through the same
+host state that already survives leaving Settings: the current
+generation (out of the cap), the phase (proposing, evaluating, or
+scoring), the candidate in progress (out of the cap, with its label
+once proposed), the candidates that already finished with the score
+each really got, tokens used against the token budget, the elapsed
+time since the run started, and proposal failures so far with the last
+reason. The elapsed clock ticks once a second from the recorded start
+time; the Stop button works as before, and stopping still leaves no
+partial promotion.
+
+Honest limits: the preview shows counts and the current phase only —
+there is no percent-complete and no ETA, because the total work is not
+knowable in advance: a run can stop early on the token budget, the
+wall-clock budget, stagnation, or a quota failure. The finished list
+shows the most recent candidates only (capped at the per-generation
+candidate cap), and the token count is what the ledger has recorded so
+far, so it moves in steps as each model call is charged.
+
 ## Safety hardening (shipped with P3)
 
 Two more layers, added before the activation wiring shipped:
