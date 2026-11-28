@@ -33,10 +33,12 @@ import com.androidharness.app.AppContainer
 import com.androidharness.app.R
 import com.androidharness.app.data.ChatModelChoice
 import com.androidharness.app.evolve.ArchiveEntry
+import com.androidharness.app.evolve.EvalReport
 import com.androidharness.app.evolve.EvolveRole
 import com.androidharness.app.evolve.EvolveRunPhase
 import com.androidharness.app.evolve.GenomeBackup
 import com.androidharness.app.evolve.PromotionGate
+import com.androidharness.app.evolve.RealProjectEvaluator
 import com.androidharness.app.llm.effectiveApiKey
 import com.androidharness.app.ui.chat.components.ModelPickerSheet
 import java.io.File
@@ -78,6 +80,17 @@ internal fun RecursiveHarnessSection(container: AppContainer) {
     var promotableText by remember { mutableStateOf<String?>(null) }
     var backupMessage by remember { mutableStateOf<String?>(null) }
     var backupBusy by remember { mutableStateOf(false) }
+    // Toolchain (P7): what the test runner reports right now. Read once
+    // at composition and again on refresh; the runner's getter reads the
+    // Linux environment marker live, so no restart is needed to pick up
+    // an install.
+    var toolchainReady by remember { mutableStateOf(RealProjectEvaluator.commandRunner.toolchainReady) }
+    // Full run report (P7): the latest run's best candidate — the
+    // promotable one when there is one, else the newest archived
+    // candidate — with its per-task report and its parent's scores.
+    var reportEntry by remember { mutableStateOf<ArchiveEntry?>(null) }
+    var reportCandidate by remember { mutableStateOf<EvalReport?>(null) }
+    var reportParent by remember { mutableStateOf<EvalReport?>(null) }
 
     LaunchedEffect(runState?.promotableId) {
         val id = runState?.promotableId
@@ -108,6 +121,30 @@ internal fun RecursiveHarnessSection(container: AppContainer) {
             entries = host.archive.entries().sortedByDescending { it.createdAt }
             activeLabel = host.store.active()?.let { active ->
                 host.store.load(active.genomeId)?.label?.ifBlank { active.genomeId }
+            }
+            toolchainReady = RealProjectEvaluator.commandRunner.toolchainReady
+        }
+    }
+
+    // Full run report (P7): load the candidate's report and its parent's
+    // report once the run is done. The promotable candidate is the run's
+    // best; without one, the newest archived candidate is shown instead.
+    val reportGenomeId = if (runState != null && !running) {
+        runState?.promotableId ?: entries.firstOrNull()?.genomeId
+    } else {
+        null
+    }
+    LaunchedEffect(reportGenomeId) {
+        if (reportGenomeId == null) {
+            reportEntry = null
+            reportCandidate = null
+            reportParent = null
+        } else {
+            withContext(Dispatchers.IO) {
+                val entry = host.archive.entries().firstOrNull { it.genomeId == reportGenomeId }
+                reportEntry = entry
+                reportCandidate = host.store.report(reportGenomeId)
+                reportParent = entry?.parent?.let { host.store.report(it) }
             }
         }
     }
@@ -257,6 +294,12 @@ internal fun RecursiveHarnessSection(container: AppContainer) {
                 )
             }
 
+            // Score text for the report block: "75% (holdout 67%)".
+            fun scoreText(successRate: Double, holdoutScore: Double?): String = buildString {
+                append("%.0f%%".format(successRate * 100))
+                holdoutScore?.let { append(" (holdout ").append("%.0f%%".format(it * 100)).append(")") }
+            }
+
             // Role models: a real model per role, picked here. Unset means the
             // app's active provider and model, like the planner does.
             listOf(EvolveRole.PROPOSER, EvolveRole.WORKER, EvolveRole.CRITIC).forEach { role ->
@@ -282,6 +325,18 @@ internal fun RecursiveHarnessSection(container: AppContainer) {
                     }
                 }
             }
+
+            // Toolchain (P7): what the test runner reports — never a claim
+            // that the toolchain was verified working. When it is missing,
+            // the 4 real tasks fail and the score ceiling is 8/12.
+            Text(
+                stringResource(
+                    if (toolchainReady) R.string.recursive_harness_toolchain_ready
+                    else R.string.recursive_harness_toolchain_missing,
+                ),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
 
             // Run controls: one evolution run, then an approval card for the winner.
             // The run lives in the host (app scope): leaving this screen does
@@ -416,6 +471,116 @@ internal fun RecursiveHarnessSection(container: AppContainer) {
                     }
                 }
             }
+            // Full run report (P7): one candidate at a time, at most 12
+            // tasks — the promotable candidate when there is one, else the
+            // newest archived candidate. No invented numbers: parent scores
+            // come from the parent's stored report, or the block says the
+            // parent was never evaluated.
+            if (reportEntry != null && runState != null && !running) {
+                val entry = reportEntry!!
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(
+                        stringResource(R.string.recursive_harness_report_title),
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        entry.label.ifBlank { entry.genomeId },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    reportCandidate?.let { candidate ->
+                        Text(
+                            context.getString(
+                                R.string.recursive_harness_report_candidate,
+                                scoreText(candidate.successRate, candidate.holdoutScore),
+                            ),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    if (reportParent != null) {
+                        Text(
+                            context.getString(
+                                R.string.recursive_harness_report_parent,
+                                entry.parent ?: "",
+                                scoreText(reportParent!!.successRate, reportParent!!.holdoutScore),
+                            ),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    } else {
+                        Text(
+                            stringResource(R.string.recursive_harness_report_parent_none),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Text(
+                        entry.gateReason?.let {
+                            context.getString(R.string.recursive_harness_report_gate, it)
+                        } ?: stringResource(R.string.recursive_harness_report_ready),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    reportCandidate?.let { candidate ->
+                        val training = candidate.tasks.filter { !it.holdout }
+                        val holdout = candidate.tasks.filter { it.holdout }
+                        if (training.isNotEmpty()) {
+                            Text(
+                                context.getString(
+                                    R.string.recursive_harness_report_training,
+                                    training.count { it.passed }, training.size,
+                                ),
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            training.forEach { task ->
+                                Text(
+                                    buildString {
+                                        append(task.taskId).append(" — ")
+                                        append(
+                                            context.getString(
+                                                if (task.passed) R.string.recursive_harness_report_task_passed
+                                                else R.string.recursive_harness_report_task_failed,
+                                            ),
+                                        )
+                                        if (task.detail.isNotBlank()) append(" — ").append(task.detail.take(200))
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                        if (holdout.isNotEmpty()) {
+                            Text(
+                                context.getString(
+                                    R.string.recursive_harness_report_holdout,
+                                    holdout.count { it.passed }, holdout.size,
+                                ),
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            holdout.forEach { task ->
+                                Text(
+                                    buildString {
+                                        append(task.taskId).append(" — ")
+                                        append(
+                                            context.getString(
+                                                if (task.passed) R.string.recursive_harness_report_task_passed
+                                                else R.string.recursive_harness_report_task_failed,
+                                            ),
+                                        )
+                                        if (task.detail.isNotBlank()) append(" — ").append(task.detail.take(200))
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
             (runState?.error ?: localError)?.let {
                 Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
             }
@@ -505,6 +670,13 @@ internal fun RecursiveHarnessSection(container: AppContainer) {
                         if (entry.hypothesis.isNotBlank()) {
                             Text(entry.hypothesis, style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        entry.gateReason?.let { reason ->
+                            Text(
+                                context.getString(R.string.recursive_harness_report_gate, reason),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
                         }
                     }
                 }

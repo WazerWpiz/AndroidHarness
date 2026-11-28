@@ -40,4 +40,16 @@
     <string name="recursive_harness_progress_failures" translatable="false">Proposal failures: %1$d</string>
     <string name="recursive_harness_progress_last_failure" translatable="false">Last failure: %1$s</string>
     <string name="recursive_harness_progress_finished" translatable="false">Finished candidates</string>
+    <string name="recursive_harness_toolchain_ready" translatable="false">Build toolchain: installed (as reported by the test runner)</string>
+    <string name="recursive_harness_toolchain_missing" translatable="false">Build toolchain: not installed (as reported by the test runner) — the 4 real tasks will fail and the score ceiling is 8/12.</string>
+    <string name="recursive_harness_report_title" translatable="false">Latest run report</string>
+    <string name="recursive_harness_report_candidate" translatable="false">Candidate — %1$s</string>
+    <string name="recursive_harness_report_parent" translatable="false">Parent %1$s — %2$s</string>
+    <string name="recursive_harness_report_ready" translatable="false">Ready to promote</string>
+    <string name="recursive_harness_report_gate" translatable="false">Gate: %1$s</string>
+    <string name="recursive_harness_report_parent_none" translatable="false">Parent has no evaluation yet.</string>
+    <string name="recursive_harness_report_training" translatable="false">Training tasks — %1$d of %2$d passed</string>
+    <string name="recursive_harness_report_holdout" translatable="false">Holdout tasks — %1$d of %2$d passed</string>
+    <string name="recursive_harness_report_task_passed" translatable="false">Passed</string>
+    <string name="recursive_harness_report_task_failed" translatable="false">Failed</string>
 </resources>

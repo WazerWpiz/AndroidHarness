@@ -152,6 +152,12 @@ class EvolutionRunner(
                     val finalReport = report.copy(safetyViolations = violations)
                     store.saveReport(finalReport)
                     reports += finalReport
+                    // The gate decision is pure, so decide before archiving and
+                    // persist the reason with the entry (P7): the screen shows
+                    // why a candidate was or was not promotable. Approved has
+                    // no reason; a rejection keeps its reason, capped at 200.
+                    val decision = PromotionGate.wouldPromote(parentReport, finalReport, violations == 0, settings)
+                    val gateReason = (decision as? GateDecision.Rejected)?.reason?.take(200)
                     if (archive.entries().none { it.genomeId == stored.id }) {
                         archive.add(
                             ArchiveEntry(
@@ -165,10 +171,10 @@ class EvolutionRunner(
                                 label = stored.label,
                                 hypothesis = stored.hypothesis,
                                 createdAt = stored.createdAt,
+                                gateReason = gateReason,
                             ),
                         )
                     }
-                    val decision = PromotionGate.wouldPromote(parentReport, finalReport, violations == 0, settings)
                     if (decision is GateDecision.Approved) {
                         if (best == null || finalReport.successRate > best.second.successRate) best = stored to finalReport
                     }
@@ -242,7 +248,10 @@ class EvolutionRunner(
             val result = runGeneration(current, workDir, generations.size + 1)
             generations += result
             promotableId = result.promotableId ?: promotableId
-            val nextId = archive.selectParent(fitness = { it.successRate ?: 0.0 })?.genomeId ?: break
+            // P7: the current parent is excluded from the draw, so the
+            // sampler cannot re-pick it and end the run after one
+            // generation. The equality check stays as a safety net.
+            val nextId = archive.selectParent(fitness = { it.successRate ?: 0.0 }, excludeId = current.id)?.genomeId ?: break
             val next = store.load(nextId) ?: break
             if (next.id == current.id) break
             current = next

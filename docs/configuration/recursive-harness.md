@@ -302,6 +302,43 @@ shows the most recent candidates only (capped at the per-generation
 candidate cap), and the token count is what the ledger has recorded so
 far, so it moves in steps as each model call is charged.
 
+## P7 — full run report, sampler fix, toolchain indicator (shipped)
+
+Three small additions, all from facts the app already records.
+
+**Full run report.** After a run finishes, the screen shows a report
+for one candidate: the promotable one when there is one, else the
+newest archived candidate. It shows the per-task breakdown from that
+genome's stored report — training and holdout tasks as separate groups
+with their counts, each task with its id, passed/failed, and its
+checker's detail — the parent's scores next to the candidate's, and
+the gate's reason in one line ("Ready to promote" or the rejection
+reason). Each archive row also shows its gate reason when one was
+recorded. The reason is the one the gate gave at evaluation time, and
+it is stored on the archive entry, capped at 200 characters.
+
+**Sampler fix.** The parent sampler used to pick at random from the
+top three entries, so it could re-pick the current parent — and the
+run then stopped after one generation, which is why some runs ended
+surprisingly fast. The runner now excludes the current parent from
+the draw before ranking, so the top three are always other entries;
+the old equality check stays as a safety net. If exclusion empties
+the pool there is nothing else to evolve from, and the run stops.
+
+**Toolchain indicator.** The section shows one line for what the test
+runner reports about the build toolchain: installed, or not installed
+with the warning that the 4 real tasks will fail and the score ceiling
+is 8/12. The runner's answer is a live read of the Linux environment
+marker, so installing the toolchain is picked up without an app
+restart.
+
+Honest limits: the gate reason is the reason at evaluation time —
+re-evaluating a genome later can give a different one. The task
+breakdown shows the latest stored report for that genome. The
+toolchain line reports what the runner says, not a verified working
+toolchain: it checks that the Linux environment reports gradle and
+openjdk-21 installed, it does not run a build to prove it.
+
 ## Safety hardening (shipped with P3)
 
 Two more layers, added before the activation wiring shipped:

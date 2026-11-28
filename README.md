@@ -43,6 +43,9 @@ This fork is upstream AndroidHarness plus the features below — nothing else is
 - **Real-project evaluation (P4).** Suite `evolve-real-v1` scores candidates on the real project itself: minimal Gradle projects built from verbatim repo files, verified by real Gradle test commands run on-device through the app's shell toolchain.
 - **Genome export and import (P5).** One JSON backup of every genome, its report, the archive and the active pointer, saved outside the app through the file picker and restored only through the existing validation checks — a reinstall can never wipe a genome again.
 - **Live run progress (P6).** While a run is going, the screen shows the live generation, phase, candidate in progress, finished candidates with their real scores, tokens used against the budget, and elapsed time — counts and the current phase only, never a percent-complete or an ETA, because a run can stop early.
+- **Full run report (P7).** After a run finishes, the screen shows the best candidate's per-task breakdown (training and holdout separately), the parent's scores next to it, and the gate's reason — "Ready to promote" or why it was rejected; each archive row shows its gate reason too.
+- **Parent sampler fix (P7).** The next parent is no longer drawn from a pool that can contain the current parent, so a run no longer ends after one generation just because the sampler re-picked the same parent.
+- **Build toolchain indicator (P7).** The section shows what the test runner reports about the build toolchain, and warns when it is missing that the 4 real tasks will fail and the score ceiling is 8/12.
 
 ## Screenshots
 

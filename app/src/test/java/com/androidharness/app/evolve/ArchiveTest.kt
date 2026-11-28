@@ -79,6 +79,29 @@ class ArchiveTest {
     }
 
     @Test
+    fun `parent selection never returns the excluded genome`() {
+        val archive = Archive(file)
+        archive.add(entry("a", rate = 0.9))
+        archive.add(entry("b", parent = "a", rate = 0.4))
+        archive.add(entry("c", rate = 0.2))
+        repeat(20) { seed ->
+            val picked = archive.selectParent(Archive::fitness, Random(seed), excludeId = "a")
+            assertTrue(picked != null)
+            // "a" is the top-ranked entry and still never picked.
+            assertTrue(picked!!.genomeId in setOf("b", "c"))
+        }
+    }
+
+    @Test
+    fun `excluding the only entry leaves no parent`() {
+        val archive = Archive(file)
+        archive.add(entry("a", rate = 0.9))
+        assertNull(archive.selectParent(Archive::fitness, excludeId = "a"))
+        // Excluding an unknown id changes nothing.
+        assertEquals("a", archive.selectParent(Archive::fitness, Random(1), excludeId = "missing")?.genomeId)
+    }
+
+    @Test
     fun `an empty archive has no parent`() {
         assertNull(Archive(file).selectParent(Archive::fitness))
     }

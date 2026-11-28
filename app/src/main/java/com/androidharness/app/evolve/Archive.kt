@@ -21,6 +21,8 @@ data class ArchiveEntry(
     val holdoutScore: Double? = null,
     val tokensPerSuccess: Double? = null,
     val safetyViolations: Int = 0,
+    /** The gate's reason at evaluation time (P7); null when the candidate met the gate. Capped at 200 chars. */
+    val gateReason: String? = null,
 )
 
 /**
@@ -81,11 +83,20 @@ class Archive(private val file: File, private val json: Json = Json { ignoreUnkn
      * A parent for the next candidate: the best few genomes by fitness, chosen at random
      * within that group. Fitness alone would keep polishing one branch; novelty — how few
      * children a genome has — lets an unexplored stepping stone win the tie. Vetoed
-     * genomes are never parents.
+     * genomes are never parents. [excludeId] (P7) is filtered out BEFORE ranking, so the
+     * top-3 pool is filled with other entries: the runner excludes the current parent,
+     * because re-picking it ends the run after one generation. If exclusion empties the
+     * pool, there is nothing else to evolve from and this returns null.
      */
     @Synchronized
-    fun selectParent(fitness: (ArchiveEntry) -> Double, random: Random = Random.Default): ArchiveEntry? {
-        val all = entries().filter { it.status != ArchiveStatus.VETOED }
+    fun selectParent(
+        fitness: (ArchiveEntry) -> Double,
+        random: Random = Random.Default,
+        excludeId: String? = null,
+    ): ArchiveEntry? {
+        val all = entries()
+            .filter { it.status != ArchiveStatus.VETOED }
+            .filter { excludeId == null || it.genomeId != excludeId }
         if (all.isEmpty()) return null
         val children = all.groupingBy { it.parent }.eachCount()
         val ranked = all.map { entry ->
