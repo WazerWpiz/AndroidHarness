@@ -133,6 +133,25 @@ class EvolveHost(val store: GenomeStore, val archive: Archive) {
     }
 
     /**
+     * Auto-prune (P9): after a run ends, the archive keeps the best
+     * [Archive.MAX_KEPT_ENTRIES] entries plus the active genome's lineage
+     * and the last run's candidate, so the list never piles up. Rows
+     * only — the stored genomes and reports stay on disk. Best-effort:
+     * a prune failure must never fail the run or lose its result, so it
+     * is silent like the pointer write.
+     */
+    private fun pruneArchive() {
+        runCatching {
+            archive.prune(
+                activeId = store.active()?.genomeId,
+                maxEntries = Archive.MAX_KEPT_ENTRIES,
+                fitness = Archive::fitness,
+                extraProtected = setOfNotNull(store.lastRun()?.candidateId),
+            )
+        }
+    }
+
+    /**
      * Starts a full run in the app-scoped [runScope]: navigating away from
      * Settings no longer cancels it. Returns false when a run is already
      * going. The run survives leaving the screen; it stops only if the app
@@ -221,6 +240,14 @@ class EvolveHost(val store: GenomeStore, val archive: Archive) {
                 runCatching {
                     store.saveLastRun(LastRun(result.promotableId, summary, System.currentTimeMillis()))
                 }.onFailure { /* The pointer is best-effort; a failed write must not fail the run. */ }
+                // Auto-prune (P9): after the pointer write, BEFORE the
+                // state flips to not-running — anything that sees a
+                // finished run must already see the pruned archive, for
+                // the same reason the pointer is written first. A prune
+                // after the flip would race every observer of the run
+                // state (the screen refreshes the list the moment the
+                // run ends, and would show the unpruned list).
+                pruneArchive()
                 _runState.update {
                     it?.copy(
                         running = false, summary = summary, promotableId = result.promotableId,
@@ -234,6 +261,11 @@ class EvolveHost(val store: GenomeStore, val archive: Archive) {
                 runCatching {
                     store.saveLastRun(LastRun(null, "Run stopped.", System.currentTimeMillis()))
                 }.onFailure { /* The pointer is best-effort; a failed write must not fail the run. */ }
+                // Auto-prune (P9) also runs when a run is stopped: the
+                // candidates it already archived still pile up. Before
+                // the state flip, as above: no suspension points inside,
+                // so the cancellation cannot interrupt it.
+                pruneArchive()
                 _runState.update {
                     it?.copy(running = false, summary = "Run stopped.", phase = EvolveRunPhase.DONE)
                         ?: EvolveRunState(running = false, summary = "Run stopped.", phase = EvolveRunPhase.DONE)

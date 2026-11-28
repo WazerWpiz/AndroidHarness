@@ -509,6 +509,30 @@ tasks on average — a parent that already scores 13/13 cannot be
 beaten, and its candidates are screened out, which is correct: there
 is nothing left to improve.
 
++**Archive pruning (P9).** After each run ends — success or stopped,
++never during the run, never when the Doctor blocks it — the archive is
++pruned automatically, before the run is shown as finished, so the list
++never shows the unpruned rows: it keeps the best 10 entries by fitness,
++plus the active genome's full lineage, plus the last run's candidate and
++its lineage. The cap is fixed at 10; there is no setting for it. Each row
++can also be deleted by hand from the list, with four protections: never
++the active genome, never an ancestor of the active genome, never the
++last run's candidate (the report block loads from it), and never a
++genome that still has children.
++
++Rows are the view, files are the record: pruning and deleting remove
++ARCHIVE ROWS ONLY. The stored genomes and their reports stay on disk —
++still included in the backup export, and the proposer's dedupe still
++checks them — so a deleted row never loses data. Pruning is
++best-effort: a failure is silent and never fails the run or loses its
++result.
++
++Honest limit: the list after a prune is the best 10 PLUS the active
++lineage PLUS the last run's candidate and their parent chains, so it
++can be more than 10 rows — 10 is the fitness cap, not a hard row
++count. With a long active lineage the list can still grow, just never
++by piling up losers.
++
 ## Safety hardening (shipped with P3)
 
 Two more layers, added before the activation wiring shipped:

@@ -65,4 +65,6 @@
     <string name="recursive_harness_doctor_never" translatable="false">Not checked yet. The Doctor runs automatically before every run.</string>
     <string name="recursive_harness_doctor_suite" translatable="false">Suite: %1$s</string>
     <string name="recursive_harness_doctor_blocked" translatable="false">Blocked: %1$s</string>
+    <string name="recursive_harness_archive_delete" translatable="false">Delete</string>
+    <string name="recursive_harness_archive_kept" translatable="false">The list keeps the best 10 entries plus the active genome\'s lineage and the last run\'s candidate; older rows are pruned automatically after each run. Deleting a row only removes it from the list — the genome and its report stay saved and exportable.</string>
 </resources>

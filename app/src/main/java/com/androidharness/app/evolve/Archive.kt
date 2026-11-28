@@ -77,14 +77,7 @@ class Archive(private val file: File, private val json: Json = Json { ignoreUnkn
     /** Root first, [id] last. Empty when the id is unknown. */
     fun lineage(id: String, all: List<ArchiveEntry> = entries()): List<ArchiveEntry> {
         val byId = all.associateBy { it.genomeId }
-        val out = mutableListOf<ArchiveEntry>()
-        val seen = mutableSetOf<String>()
-        var current = byId[id]
-        while (current != null && seen.add(current.genomeId)) {
-            out += current
-            current = current.parent?.let(byId::get)
-        }
-        return out.asReversed()
+        return lineageIds(id, all).mapNotNull { byId[it] }
     }
 
     fun children(id: String, all: List<ArchiveEntry> = entries()): List<ArchiveEntry> =
@@ -122,28 +115,87 @@ class Archive(private val file: File, private val json: Json = Json { ignoreUnkn
 
     /**
      * Drop old losers, never the active genome, its lineage, or the best [maxEntries] by
-     * fitness. Returns how many entries were removed.
+     * fitness. [extraProtected] (P9) are extra genomes to keep besides the active
+     * lineage and the fittest — the last run's candidate, so the report block keeps
+     * its row — and their lineages are kept too. Returns how many entries were removed.
+     *
+     * Rows only: pruning removes archive rows, never the stored genomes or their
+     * reports — those stay on disk, still exportable and still deduped against.
      */
     @Synchronized
-    fun prune(activeId: String?, maxEntries: Int, fitness: (ArchiveEntry) -> Double): Int {
+    fun prune(
+        activeId: String?,
+        maxEntries: Int,
+        fitness: (ArchiveEntry) -> Double,
+        extraProtected: Set<String> = emptySet(),
+    ): Int {
         require(maxEntries >= 1) { "Keep at least one entry." }
         val all = entries()
         if (all.size <= maxEntries) return 0
         val keep = linkedSetOf<String>()
-        activeId?.let { keep += lineage(it, all).map { entry -> entry.genomeId } }
+        activeId?.let { keep += lineageIds(it, all) }
+        extraProtected.forEach { keep += lineageIds(it, all) }
         all.sortedByDescending(fitness).take(maxEntries).forEach { keep += it.genomeId }
         // Never orphan a kept entry's parent chain.
-        keep.toList().forEach { id -> keep += lineage(id, all).map { it.genomeId } }
+        keep.toList().forEach { id -> keep += lineageIds(id, all) }
         val kept = all.filter { it.genomeId in keep }
         persist(kept)
         return all.size - kept.size
+    }
+
+    /**
+     * Removes one archive row (P9): the list entry only. The stored genome and its
+     * report stay on disk — still exportable, still deduped against — so deleting
+     * a row never loses data. No-op when the row is absent.
+     */
+    @Synchronized
+    fun remove(genomeId: String) {
+        val all = entries()
+        if (all.none { it.genomeId == genomeId }) return
+        persist(all.filter { it.genomeId != genomeId })
     }
 
     companion object {
         private const val TOP_PARENTS = 3
         private const val NOVELTY_WEIGHT = 0.25
 
+        /** How many archive rows the auto-prune (P9) keeps by fitness, besides the protected sets. */
+        const val MAX_KEPT_ENTRIES = 10
+
         fun fitness(entry: ArchiveEntry): Double =
             (entry.successRate ?: 0.0) - if (entry.safetyViolations > 0) 1.0 else 0.0
+
+        /** Root-first genome ids of [id]'s lineage, from the given entries. Empty when unknown. */
+        private fun lineageIds(id: String, all: List<ArchiveEntry>): List<String> {
+            val byId = all.associateBy { it.genomeId }
+            val out = mutableListOf<String>()
+            val seen = mutableSetOf<String>()
+            var current = byId[id]
+            while (current != null && seen.add(current.genomeId)) {
+                out += current.genomeId
+                current = current.parent?.let(byId::get)
+            }
+            return out.asReversed()
+        }
+
+        /**
+         * Whether an archive row may be deleted by hand (P9): never the active genome,
+         * never an ancestor of the active genome (its lineage), never the last run's
+         * candidate (the report block loads from it), and never a genome that still
+         * has children (deleting a parent orphans them). Pure: decided from the given
+         * entries only, so it is unit-testable. Deleting a row only removes the row.
+         */
+        fun canDeleteEntry(
+            genomeId: String,
+            activeId: String?,
+            lastRunCandidateId: String?,
+            all: List<ArchiveEntry>,
+        ): Boolean {
+            if (genomeId == activeId) return false
+            if (genomeId == lastRunCandidateId) return false
+            if (activeId != null && genomeId in lineageIds(activeId, all)) return false
+            if (all.any { it.parent == genomeId }) return false
+            return true
+        }
     }
 }

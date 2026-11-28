@@ -32,6 +32,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.androidharness.app.AppContainer
 import com.androidharness.app.R
 import com.androidharness.app.data.ChatModelChoice
+import com.androidharness.app.evolve.Archive
 import com.androidharness.app.evolve.ArchiveEntry
 import com.androidharness.app.evolve.Doctor
 import com.androidharness.app.evolve.DoctorStatus
@@ -77,6 +78,8 @@ internal fun RecursiveHarnessSection(container: AppContainer) {
     var pickingRole by remember { mutableStateOf<EvolveRole?>(null) }
     var entries by remember { mutableStateOf<List<ArchiveEntry>>(emptyList()) }
     var activeLabel by remember { mutableStateOf<String?>(null) }
+    // The active genome's id, for the per-row delete guard (P9).
+    var activeId by remember { mutableStateOf<String?>(null) }
     // The run lives in the host, not in this screen: leaving Settings does
     // not stop it, and coming back shows its live state.
     val runState by host.runState.collectAsStateWithLifecycle(initialValue = null)
@@ -130,6 +133,7 @@ internal fun RecursiveHarnessSection(container: AppContainer) {
     suspend fun refresh() {
         withContext(Dispatchers.IO) {
             entries = host.archive.entries().sortedByDescending { it.createdAt }
+            activeId = host.store.active()?.genomeId
             activeLabel = host.store.active()?.let { active ->
                 host.store.load(active.genomeId)?.label?.ifBlank { active.genomeId }
             }
@@ -829,6 +833,14 @@ internal fun RecursiveHarnessSection(container: AppContainer) {
                 Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
             }
 
+            // Archive (P9): the list keeps the best 10 entries plus the
+            // active genome's lineage and the last run's candidate; older
+            // rows are pruned automatically after each run.
+            Text(
+                stringResource(R.string.recursive_harness_archive_kept),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             if (entries.isEmpty()) {
                 Text(stringResource(R.string.recursive_harness_empty), style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -860,6 +872,22 @@ internal fun RecursiveHarnessSection(container: AppContainer) {
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
+                        }
+                        // Per-row delete (P9): rows only, never the active
+                        // genome, its lineage, the last run's candidate,
+                        // or a genome with children. The genome and its
+                        // report stay saved and exportable.
+                        if (Archive.canDeleteEntry(entry.genomeId, activeId, lastRun?.candidateId, entries)) {
+                            TextButton(
+                                onClick = {
+                                    scope.launch {
+                                        withContext(Dispatchers.IO) { host.archive.remove(entry.genomeId) }
+                                        refresh()
+                                    }
+                                },
+                            ) {
+                                Text(stringResource(R.string.recursive_harness_archive_delete))
+                            }
                         }
                     }
                 }
