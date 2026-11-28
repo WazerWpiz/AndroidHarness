@@ -25,6 +25,7 @@ object ProtectedPaths {
         "${APP}evolve/PromotionGate.kt",
         "${APP}evolve/LiveEvaluator.kt",
         "${APP}evolve/RealProjectEvaluator.kt",
+        "${APP}evolve/GenomeBackup.kt",
         "${APP}evolve/TestCommandRunner.kt",
         "${APP}evolve/ShellTestCommandRunner.kt",
         "${APP}evolve/RealProjectTaskData.kt",

@@ -22,4 +22,12 @@
     <string name="recursive_harness_critic" translatable="false">Critic model</string>
     <string name="recursive_harness_change" translatable="false">Change</string>
     <string name="recursive_harness_model_fallback" translatable="false">Not set — uses the active model</string>
+    <string name="recursive_harness_export" translatable="false">Export genomes</string>
+    <string name="recursive_harness_import" translatable="false">Import genomes</string>
+    <string name="recursive_harness_backup_description" translatable="false">Save every genome, its report, the archive and the active pointer as one JSON file outside the app, so a reinstall can never wipe them. Import restores only through the existing checks and never activates anything — re-promote through the normal approval if you want a genome active again.</string>
+    <string name="recursive_harness_export_done" translatable="false">Backup saved: %1$d genomes, %2$d reports, %3$d archive entries.</string>
+    <string name="recursive_harness_import_done" translatable="false">Imported %1$d genomes, %2$d reports, %3$d archive entries; %4$d already present.</string>
+    <string name="recursive_harness_import_refused" translatable="false">Refused: %1$s</string>
+    <string name="recursive_harness_backup_failed" translatable="false">Backup failed: %1$s</string>
+    <string name="recursive_harness_backup_open_failed" translatable="false">Could not open the file.</string>
 </resources>

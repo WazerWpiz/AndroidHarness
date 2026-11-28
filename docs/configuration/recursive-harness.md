@@ -253,6 +253,33 @@ tail; the file guard rejects a changed file by byte length before
 reading it, and file listings read at most 8,000 characters per file,
 so a huge worker-written file is never loaded into memory.
 
+## P5 — genome export / import (shipped)
+
+A reinstall used to wipe every genome: genomes live in app-private
+storage, and uninstalling the app deletes it. `GenomeBackup` adds two
+buttons to Settings → Recursive harness:
+
+- **Export genomes** writes one JSON file with every genome, each
+  genome's report, the archive entries, and the active pointer, through
+  the system file picker — so it lands outside the app (Downloads).
+- **Import genomes** picks that file back. Every genome re-enters only
+  through the existing checks: the id must still match the content
+  (`Genome.computeId()`), then `GenomeRules.requireValid()`, then the
+  store's own hash check on save. A tampered genome is refused with a
+  clear reason; a genome already stored with different bytes is never
+  overwritten; reports and archive entries are restored only for genomes
+  that are present. Import never activates anything: the active pointer
+  in the file is recorded but not restored — re-promote through the
+  normal approval if you want a genome active again.
+
+Honest limits: the backup is manual — there is no cloud copy and no
+auto-backup; you must tap Export and keep the file yourself. The file
+is plain-text JSON: genomes are instructions, not secrets, but it holds
+your agent's instructions, so keep it somewhere only you can read.
+Import refuses files larger than 16 MB before reading them fully, and a
+malformed file is refused with a clear message. The backup is a snapshot:
+genomes evaluated after the export are not in it.
+
 ## Safety hardening (shipped with P3)
 
 Two more layers, added before the activation wiring shipped:

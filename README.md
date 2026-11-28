@@ -41,6 +41,7 @@ This fork is upstream AndroidHarness plus the features below — nothing else is
 - **Real model-backed evolution (DGM + Voyager).** Proposer, worker and critic roles, live benchmark evaluation, and no fake or template scores — a candidate only scores what a real model does.
 - **Activation wiring and safety (P3).** The active genome reaches the agent's prompt behind an on/off toggle, runs are app-scoped with a Stop button, an override-phrase blacklist refuses genomes that try to talk the agent out of its safety rules, and the promotion gate requires a win on training AND holdout.
 - **Real-project evaluation (P4).** Suite `evolve-real-v1` scores candidates on the real project itself: minimal Gradle projects built from verbatim repo files, verified by real Gradle test commands run on-device through the app's shell toolchain.
+- **Genome export and import (P5).** One JSON backup of every genome, its report, the archive and the active pointer, saved outside the app through the file picker and restored only through the existing validation checks — a reinstall can never wipe a genome again.
 
 ## Screenshots
 

@@ -1,5 +1,7 @@
 package com.androidharness.app.ui.settings
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -32,10 +34,15 @@ import com.androidharness.app.R
 import com.androidharness.app.data.ChatModelChoice
 import com.androidharness.app.evolve.ArchiveEntry
 import com.androidharness.app.evolve.EvolveRole
+import com.androidharness.app.evolve.GenomeBackup
 import com.androidharness.app.evolve.PromotionGate
 import com.androidharness.app.llm.effectiveApiKey
 import com.androidharness.app.ui.chat.components.ModelPickerSheet
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -67,6 +74,8 @@ internal fun RecursiveHarnessSection(container: AppContainer) {
     val running = runState?.running == true
     var localError by remember { mutableStateOf<String?>(null) }
     var promotableText by remember { mutableStateOf<String?>(null) }
+    var backupMessage by remember { mutableStateOf<String?>(null) }
+    var backupBusy by remember { mutableStateOf(false) }
 
     LaunchedEffect(runState?.promotableId) {
         val id = runState?.promotableId
@@ -106,6 +115,80 @@ internal fun RecursiveHarnessSection(container: AppContainer) {
     // The archive gains entries while a run is going; reload when it ends.
     LaunchedEffect(runState?.running) {
         if (runState?.running == false && runState != null) refresh()
+    }
+
+    // Backup (P5): one JSON file with every genome, its report, the
+    // archive and the active pointer, saved outside the app through the
+    // system file picker — so a reinstall can never wipe a genome.
+    // Import restores only through the existing checks and never
+    // activates anything; a tampered file is refused with a clear message.
+    val suggestedBackupName = remember {
+        "androidharness-genomes-" + SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date()) + ".json"
+    }
+    val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        backupMessage = null
+        localError = null
+        backupBusy = true
+        scope.launch {
+            try {
+                val prepared = withContext(Dispatchers.IO) {
+                    val backup = GenomeBackup.build(host.store, host.archive)
+                    GenomeBackup.encode(backup) to backup
+                }
+                withContext(Dispatchers.IO) {
+                    requireNotNull(context.contentResolver.openOutputStream(uri, "wt")).bufferedWriter().use {
+                        it.write(prepared.first)
+                    }
+                }
+                backupMessage = context.getString(
+                    R.string.recursive_harness_export_done,
+                    prepared.second.genomes.size, prepared.second.reports.size, prepared.second.entries.size,
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                localError = context.getString(R.string.recursive_harness_backup_failed, e.message ?: "")
+            } finally {
+                backupBusy = false
+            }
+        }
+    }
+    val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        backupMessage = null
+        localError = null
+        backupBusy = true
+        scope.launch {
+            try {
+                val outcome = withContext(Dispatchers.IO) {
+                    val stream = context.contentResolver.openInputStream(uri)
+                        ?: throw IllegalArgumentException(context.getString(R.string.recursive_harness_backup_open_failed))
+                    val backup = GenomeBackup.decode(GenomeBackup.readBackupText(stream))
+                    GenomeBackup.importInto(host.store, host.archive, backup)
+                }
+                backupMessage = buildString {
+                    append(context.getString(
+                        R.string.recursive_harness_import_done,
+                        outcome.importedGenomes, outcome.importedReports, outcome.importedEntries, outcome.skippedGenomes,
+                    ))
+                    if (outcome.refusedGenomes.isNotEmpty()) {
+                        append(" ")
+                        append(context.getString(
+                            R.string.recursive_harness_import_refused,
+                            outcome.refusedGenomes.take(3).joinToString("; "),
+                        ))
+                    }
+                }
+                refresh()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                localError = context.getString(R.string.recursive_harness_backup_failed, e.message ?: "")
+            } finally {
+                backupBusy = false
+            }
+        }
     }
 
     SettingsPanel(Modifier.fillMaxWidth()) {
@@ -258,6 +341,30 @@ internal fun RecursiveHarnessSection(container: AppContainer) {
                         }
                     }
                 }
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+            Text(
+                stringResource(R.string.recursive_harness_backup_description),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = { exportLauncher.launch(suggestedBackupName) },
+                    enabled = !backupBusy,
+                ) {
+                    Text(stringResource(R.string.recursive_harness_export))
+                }
+                Button(
+                    onClick = { importLauncher.launch(arrayOf("application/json")) },
+                    enabled = !backupBusy,
+                ) {
+                    Text(stringResource(R.string.recursive_harness_import))
+                }
+            }
+            backupMessage?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
             }
 
             if (entries.isEmpty()) {
