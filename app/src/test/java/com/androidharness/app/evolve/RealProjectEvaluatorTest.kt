@@ -9,7 +9,9 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assume
 import org.junit.Test
@@ -161,7 +163,9 @@ class RealProjectEvaluatorTest {
             maxCandidates = host.settings.maxCandidates,
             stagnationLimit = host.settings.stagnationsBeforeStop,
         )
-        return EvolutionRunner(host.store, host.archive, ledger, host.settings, caller)
+        // No-op delays: the 1-second inter-task pause is real in
+        // production but must never slow a test.
+        return EvolutionRunner(host.store, host.archive, ledger, host.settings, caller, delayFn = {})
     }
 
     // ------------------------------------------------------------------ evaluate
@@ -180,7 +184,9 @@ class RealProjectEvaluatorTest {
         assertEquals(1, report.tasks.count { it.holdout })
         assertEquals(listOf("real-secret-redactor"), report.tasks.filter { it.holdout }.map { it.taskId })
         assertEquals(4 * 300L, tokens.first)
-        assertEquals(4 * 60L, tokens.second)
+        // P8: the critic is skipped for real tasks — the deterministic
+        // checker decides alone — so there are no critic tokens at all.
+        assertEquals(0L, tokens.second)
         assertEquals("real/fake/worker", report.modelPin)
         assertEquals(4, runner.runCalls)
         assertTrue(runner.lastCommand!!.startsWith("gradle test"))
@@ -231,6 +237,10 @@ class RealProjectEvaluatorTest {
         assertEquals("real/toolchain-missing", report.modelPin)
         assertEquals(0, workerCalls)
         assertEquals(0, runner.runCalls)
+        // P8: toolchain-missing is SKIPPED, not FAIL — and with 4 of 4
+        // tasks undecided the report is INVALID.
+        assertTrue(report.tasks.all { it.resolvedStatus == TaskStatus.SKIPPED })
+        assertFalse(report.valid)
         assertTrue(report.tasks.all { RealProjectEvaluator.TOOLCHAIN_MISSING_DETAIL in it.detail })
     }
 
@@ -246,17 +256,22 @@ class RealProjectEvaluatorTest {
     }
 
     @Test
-    fun `a timed-out command is a task failure not a hang`() = runBlocking {
+    fun `a timed-out command is an ERROR retried once, not a hang`() = runBlocking {
         val runner = FakeRunner(forcedTimedOut = true)
         RealProjectEvaluator.commandRunner = runner
         val caller = FakeModelCaller(worker = realFixingWorker())
         val (report, _) = RealProjectEvaluator.evaluate(Genome.baseline(), caller, root.resolve("work"))
         assertEquals(0.0, report.successRate, 0.0)
+        // P8: a timeout is infra (ERROR), never a FAIL blamed on the
+        // genome — and the repair rounds stop at once, because re-asking
+        // the worker cannot fix a command that timed out. Each task is
+        // attempted twice (the one timeout retry): 4 tasks x 2 = 8 runs.
+        assertTrue(report.tasks.all { it.resolvedStatus == TaskStatus.ERROR })
         assertTrue(report.tasks.all { "timed out" in it.detail })
         // The child was destroyed before the timeout was reported (the
         // router's contract), so no Gradle process survives the failure.
         assertTrue(runner.destroyCalledOnTimeout)
-        assertEquals(12, runner.runCalls)
+        assertEquals(8, runner.runCalls)
     }
 
     @Test
@@ -347,14 +362,17 @@ class RealProjectEvaluatorTest {
     }
 
     @Test
-    fun `failing critic vetoes a real task the tests passed`() = runBlocking {
+    fun `the critic is never called for real tasks, even when it would veto`() = runBlocking {
         val runner = FakeRunner()
         RealProjectEvaluator.commandRunner = runner
+        // P8: the critic is SKIPPED for real tasks — the deterministic
+        // checker decides alone. A FAIL verdict from the critic must not
+        // change anything, and the critic must not even be called.
         val caller = FakeModelCaller(worker = realFixingWorker(), criticVerdict = "FAIL — no, the repair does not match the specification")
         val (report, _) = RealProjectEvaluator.evaluate(Genome.baseline(), caller, root.resolve("work"))
-        assertEquals(0.0, report.successRate, 0.0)
-        assertEquals(0.0, report.holdoutScore!!, 0.0)
-        assertTrue(report.tasks.all { "critic" in it.detail })
+        assertEquals(1.0, report.successRate, 0.0)
+        assertEquals(1.0, report.holdoutScore!!, 0.0)
+        assertEquals(0, caller.criticCalls)
     }
 
     @Test
@@ -413,56 +431,72 @@ class RealProjectEvaluatorTest {
         RealProjectEvaluator.commandRunner = FakeRunner()
         val host = EvolveHost.at(root)
         val parent = host.store.save(Genome.baseline())
+        // The worker is competent under the candidate (fixes the real
+        // tasks) and live-only under the parent, so the candidate
+        // exceeds the parent at 1 seed (17/17 vs 13/17) and confirms.
         val caller = FakeModelCaller(
             proposerGenome = { _ ->
                 parent.copy(
                     label = "gen-verify",
                     hypothesis = "A verify-before-done line should stop claims without evidence.",
                     instructions = parent.instructions + "Verify before claiming done: run the checks and quote their evidence.",
+                    proposerNotes = "Evidence: the parent cannot fix the real tasks; a verify step should stop the wrong repairs.",
                 )
             },
-            worker = combinedWorker(),
+            workerSystem = { system, user ->
+                if ("Verify before claiming done" in system) combinedWorker()(user)
+                else FakeModelCaller.correctWorker()(user)
+            },
         )
         val result = runner(caller).runGeneration(parent, File(root, "runs"))
         assertTrue(result.reports.isNotEmpty())
-        assertTrue(result.reports.all { it.tasks.size == 12 })
+        assertTrue(result.reports.all { it.tasks.size == 17 })
         val report = result.reports.first()
         assertEquals(1.0, report.successRate, 0.0)
         assertEquals(1.0, report.holdoutScore!!, 0.0)
         // Suite identity stays the live suite's id.
         assertEquals(LiveEvaluator.SUITE_ID, report.suiteId)
-        // 12 tasks passed: live 8x(300+60) + real 4x(300+60) = 4320 tokens / 12 = 360
-        assertEquals(360.0, report.tokensPerSuccess, 0.0)
+        // 17 tasks passed: live 13x300 worker + 2x60 critic + real
+        // 4x300 worker (no critic for real tasks) = 5220 tokens / 17.
+        assertEquals(5220.0 / 17.0, report.tokensPerSuccess, 0.01)
         assertEquals(3, report.tasks.count { it.holdout })
         assertNotNull(result.promotableId)
         assertTrue(host.archive.entries().any { it.genomeId == result.candidateIds.first() })
     }
 
     @Test
-    fun `runGeneration with a live-only worker scores 8 of 12 and 2 of 3 holdouts`() = runBlocking {
+    fun `runGeneration with a live-only worker scores 13 of 17 and 2 of 3 holdouts, and the tie is screened out`() = runBlocking {
         RealProjectEvaluator.commandRunner = FakeRunner()
         val host = EvolveHost.at(root)
         val parent = host.store.save(Genome.baseline())
+        // P8: the candidate ties its parent (13/17 both — the live
+        // tasks pass, the real tasks fail for both), so it is screened
+        // out, not promoted. The old "parent has no report" approval
+        // is gone: Baseline is always evaluated first now.
         val caller = FakeModelCaller(
             proposerGenome = { _ ->
                 parent.copy(
                     label = "gen-verify",
                     hypothesis = "A verify-before-done line should stop claims without evidence.",
                     instructions = parent.instructions + "Verify before claiming done: run the checks and quote their evidence.",
+                    proposerNotes = "Evidence: the parent cannot fix the real tasks; a verify step should stop the wrong repairs.",
                 )
             },
             worker = FakeModelCaller.correctWorker(),
         )
         val result = runner(caller).runGeneration(parent, File(root, "runs"))
         assertTrue(result.reports.isNotEmpty())
-        assertTrue(result.reports.all { it.tasks.size == 12 })
+        assertTrue(result.reports.all { it.tasks.size == 17 })
         val report = result.reports.first()
-        assertEquals(8.0 / 12.0, report.successRate, 0.0)
+        assertEquals(13.0 / 17.0, report.successRate, 0.0)
         assertEquals(2.0 / 3.0, report.holdoutScore!!, 0.0)
         assertEquals(LiveEvaluator.SUITE_ID, report.suiteId)
-        // live 8x(300+60) + real 4 tasks x 3 rounds x 300 (no critic: checker never passed) = 6480 / 8 = 810
-        assertEquals(810.0, report.tokensPerSuccess, 0.0)
-        // The gate compares against a parent with no report, so it still approves.
-        assertNotNull(result.promotableId)
+        // live 13x300 worker + 2x60 critic + real 4 tasks x 3 rounds
+        // x 300 (no critic: the checker never passed) = 7620 / 13.
+        assertEquals(7620.0 / 13.0, report.tokensPerSuccess, 0.01)
+        assertNull(result.promotableId)
+        val entry = host.archive.entries().first { it.genomeId == result.candidateIds.first() }
+        assertNotNull(entry.gateReason)
+        assertTrue(entry.gateReason!!.contains("screening"))
     }
 }

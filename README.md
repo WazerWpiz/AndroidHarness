@@ -45,7 +45,8 @@ This fork is upstream AndroidHarness plus the features below — nothing else is
 - **Live run progress (P6).** While a run is going, the screen shows the live generation, phase, candidate in progress, finished candidates with their real scores, tokens used against the budget, and elapsed time — counts and the current phase only, never a percent-complete or an ETA, because a run can stop early.
 - **Full run report (P7).** After a run finishes, the screen shows the best candidate's per-task breakdown (training and holdout separately), the parent's scores next to it, and the gate's reason — "Ready to promote" or why it was rejected; each archive row shows its gate reason too.
 - **Parent sampler fix (P7).** The next parent is no longer drawn from a pool that can contain the current parent, so a run no longer ends after one generation just because the sampler re-picked the same parent.
-- **Build toolchain indicator (P7).** The section shows what the test runner reports about the build toolchain, and warns when it is missing that the 4 real tasks will fail and the score ceiling is 8/12.
+- **Build toolchain indicator (P7).** The section shows what the test runner reports about the build toolchain, and warns when it is missing that the run uses the lite suite (13 live tasks, no real tasks) instead of the full suite.
+- **Fair evaluation (P8).** Task results are PASS/FAIL/ERROR/SKIPPED (only decided tasks count), invalid reports (>20% ERROR/SKIPPED) are never promoted, candidates are screened at 1 seed and confirmed on 3 seeds, and promotion needs +2 tasks on average with no holdout regression; a Doctor preflight checks the toolchain, models and storage before each run.
 
 ## Screenshots
 

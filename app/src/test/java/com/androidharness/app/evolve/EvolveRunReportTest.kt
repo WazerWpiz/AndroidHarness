@@ -14,12 +14,15 @@ import org.junit.Test
 
 /**
  * P7 — full run report, sampler fix, toolchain indicator.
+ * P8 — the report block loads from the stored last-run pointer, the
+ * gate reasons are the P8 screening/confirmation reasons, and the lite
+ * suite (13 live tasks) is selected when the toolchain is missing.
  *
  * Nothing here calls a real model: the runner tests use the scripted
  * [FakeModelCaller], and the toolchain test only swaps the [TestCommandRunner]
- * the evaluator reads. The real-project tasks run with the unavailable
- * runner, so they fail honestly with the toolchain-missing detail — the
- * same way they fail on a phone without the toolchain.
+ * the evaluator reads. The real-project tasks are not run at all when
+ * the toolchain is missing — the Doctor selects the lite suite instead
+ * of failing them.
  */
 class EvolveRunReportTest {
 
@@ -47,7 +50,7 @@ class EvolveRunReportTest {
             maxCandidates = host.settings.maxCandidates,
             stagnationLimit = host.settings.stagnationsBeforeStop,
         )
-        return EvolutionRunner(host.store, host.archive, ledger, host.settings, caller)
+        return EvolutionRunner(host.store, host.archive, ledger, host.settings, caller, delayFn = {})
     }
 
     private fun callerWithCounter(): FakeModelCaller {
@@ -59,7 +62,12 @@ class EvolveRunReportTest {
                 parent.copy(
                     label = "gen-$n",
                     hypothesis = "Candidate $n.",
-                    instructions = parent.instructions + "Step $n: verify before claiming done.",
+                    // Accumulate: each candidate has more instructions than
+                    // any earlier one, so the dimension rule (an added
+                    // instruction) passes against whatever parent the
+                    // sampler picked.
+                    instructions = (1..n).map { "Step $it: verify before claiming done." },
+                    proposerNotes = "Evidence: candidate $n.",
                 )
             },
             worker = FakeModelCaller.correctWorker(),
@@ -72,9 +80,16 @@ class EvolveRunReportTest {
                 label = "gen-verify",
                 hypothesis = "A verify-before-done line should stop claims without evidence.",
                 instructions = parent.instructions + "Verify before claiming done: run the checks and quote their evidence.",
+                proposerNotes = "Evidence: the parent over-renames fetchDataInternal and mis-sorts; a verify step should stop both.",
             )
         },
-        worker = FakeModelCaller.correctWorker(),
+        workerSystem = { system, user ->
+            // workerSystem returns the worker's OUTPUT for this call,
+            // not the worker function itself.
+            val w = if ("Verify before claiming done" in system) FakeModelCaller.correctWorker()
+            else FakeModelCaller.imperfectWorker()
+            w(user)
+        },
     )
 
     @Test
@@ -85,10 +100,12 @@ class EvolveRunReportTest {
         assertNotNull(result.promotableId)
         val entry = host.archive.entries().first { it.genomeId == result.promotableId }
         assertNull(entry.gateReason)
-        // The stored report is the one the screen shows: 12 tasks.
+        // The stored report is the one the screen shows: 13 live tasks
+        // in the lite suite, confirmed on 3 seeds.
         val report = host.store.report(result.promotableId!!)
         assertNotNull(report)
-        assertEquals(12, report!!.tasks.size)
+        assertEquals(13, report!!.tasks.size)
+        assertEquals(listOf(1, 2, 3), report.seeds)
     }
 
     @Test
@@ -105,6 +122,7 @@ class EvolveRunReportTest {
                     label = "gen-worse",
                     hypothesis = "A candidate that scores nothing.",
                     instructions = parent2.instructions + "Step 2: verify before claiming done.",
+                    proposerNotes = "Evidence: a candidate that scores nothing.",
                 )
             },
             worker = { "" },
@@ -114,7 +132,7 @@ class EvolveRunReportTest {
         assertNull(gen2.promotableId)
         val entry = host.archive.entries().first { it.genomeId == gen2.candidateIds.first() }
         assertNotNull(entry.gateReason)
-        assertTrue(entry.gateReason!!.contains("below"))
+        assertTrue(entry.gateReason!!.contains("screening"))
         assertTrue(entry.gateReason!!.length <= 200)
     }
 

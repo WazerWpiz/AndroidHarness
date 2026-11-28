@@ -339,6 +339,176 @@ toolchain line reports what the runner says, not a verified working
 toolchain: it checks that the Linux environment reports gradle and
 openjdk-21 installed, it does not run a build to prove it.
 
+## P8 — fair evaluation, Doctor preflight, persisted run report (shipped)
+
+Seven fixes that make the score mean something, a preflight that
+checks the run can actually work, and a report block that survives
+an app restart.
+
+**Task statuses and INVALID reports.** Every task now reports a
+status: PASS, FAIL, ERROR or SKIPPED. Only decided tasks (PASS/FAIL)
+count in the success rate — an ERROR or SKIPPED task never counts as
+a failure and never counts as a pass. Infra failures are ERROR: rate
+limits, quota exhausted, timeouts, a model call that failed, an
+unparseable critic verdict, a checker that threw. Agent failures are
+FAIL: the checker failed, the critic gave a FAIL verdict, the worker
+produced no usable output. An ERROR outcome is retried up to 3 times
+with exponential backoff (1s, 2s, 4s); an answer that says "try again
+in N seconds" is respected, capped at 60 seconds per wait. Tasks run
+sequentially with a 1-second pause between them, to reduce rate-limit
+hits on free models. A Gradle timeout is retried only once, because
+each retry costs up to 10 minutes of wall time — and the repair rounds
+stop at once on a timeout, because re-asking the worker cannot fix a
+command that timed out. If more than 20% of
+the chosen suite's tasks are ERROR/SKIPPED, the report is INVALID:
+it is stored and shown, marked invalid, but it is NEVER used for a
+promotion decision or for proposer feedback. With the toolchain
+missing and no lite switch, every report would be invalid — which is
+exactly why the lite switch exists.
+
+**Doctor preflight.** Before every run, the Doctor checks the Linux
+userspace, the JDK version (must be 21), the Gradle version, the
+Android SDK tools (d8, apksigner, aapt2), free storage, free RAM, the
+network (a TCP connect to repo1.maven.org:443), the provider keys for
+the three configured role models, a minimal one-word ping for each role model (capped at 8 output tokens),
+the suite fixtures, and a tiny hello-world Gradle build (120-second
+timeout) proving the toolchain actually builds. The checklist is in
+Settings, with a per-item Fix button where a fix exists: toolchain
+items reuse the Linux environment install/update flow, key and ping
+items open the model picker for that role. The blocking set is
+explicit: a model ping that fails blocks the run with the exact reason
+(no evaluation starts, no tokens spent); critically low storage
+(under 200 MB) blocks it too. A missing toolchain does NOT block: the
+run switches to the lite suite. Everything else warns. The Doctor
+result is stored on every report the run produces. A check that cannot
+be performed reports "unknown" with the reason, never a guessed pass.
+Cost: the whole preflight is cheap except the smoke test (one tiny
+Gradle build, up to 120 seconds on a cold plugin cache) and the three
+minimal model pings.
+
+**Preflight selects the suite; SKIPPED is for inside the suite.**
+The preflight picks the suite: full (13 live + 4 real tasks, 17
+total) when the toolchain is ready, lite (13 live tasks, no real
+tasks) when it is not. SKIPPED applies to tasks that cannot run
+WITHIN the chosen suite — for example a real task whose command
+cannot run for an infra reason other than the toolchain. Promotion
+only ever compares reports from the same suite: a lite 100% (13/13)
+and a full 100% (17/17) are different denominators and are never
+compared.
+
+**Fair comparison.** Baseline is evaluated first, once per
+(suite, suite version, worker pin, critic pin, seeds), and the stored
+report is reused while the key matches; it is re-evaluated only when
+the model or the suite changes. The cache key comes from the
+CONFIGURED role models, so when the roles fall back to the app's
+active model (no stable identifier) there is no reuse and the parent
+is evaluated fresh. Every candidate is screened at 1 seed first:
+only a candidate whose 1-seed success rate is STRICTLY greater than
+its parent's on the same seed goes to a 3-seed confirmation, where
+candidate and parent are both evaluated on the same 3 seeds (seed 1
+is reused from the screening; seeds 2 and 3 are fresh, unless the
+parent already has a cached 3-seed aggregate). The promotion rule is
+now: the candidate beats the parent by at least +2 tasks on average
+across the 3 confirmation seeds, AND its mean holdout score is not
+lower than the parent's. A 1-task win is never enough. The gate also
+refuses to compare reports with different model pins, different
+critic pins, or different suites, and refuses INVALID reports on
+either side. All safety vetoes are unchanged, including the token
+regression check. Cost: confirmation roughly triples the evaluation
+work for a candidate that passes screening, and the parent is
+evaluated on the same 3 seeds — but only for candidates that already
+beat the parent at 1 seed, and the budget ledger still caps the run:
+a run that would exceed the budget mid-confirmation stops honestly
+with the ledger reason and never overspends. `minSuccessDelta` is no
+longer used by the gate since P8 (the +2-task rule replaced the
+percentage bar); the setting stays in storage so old settings still
+read.
+
+**Critic strict JSON.** The critic must return
+`{"verdict":"PASS|FAIL","reason":"..."}` and the parser accepts ONLY
+that — no free-text fallback, no startsWith("PASS"). Unparseable
+output, a missing or invalid verdict, or a PASS whose reason says the
+task failed, is ERROR, not FAIL. Temperature 0 could NOT be forced:
+the model-call path (`EvolveModelCaller` → provider) has no
+temperature parameter anywhere in the app, so there is nothing to
+set. Determinism is enforced by the JSON-only prompt plus this strict
+parsing, and this doc says so instead of pretending a temperature was
+forced. The critic is SKIPPED for tasks whose checker is fully
+deterministic — the checker decides alone. Per task: rename-function
+and its three variants, file-read-paging, file-list-grep, multi-edit,
+apply-patch-hunk, git-status-diff, sort-lines, dedupe-lines and the
+four real tasks are deterministic (Gradle exit 0 plus the guards for
+the real ones); verify-before-done and pinned-constraint still need
+the critic, because their checkers are only a partial test of the
+task (the evidence line's truth, the first and last lines around the
+pinned line).
+
+**Proposer.** The proposer prompt now classifies each failing
+training task as agent-failure or infra-failure and says explicitly
+that infra failures cannot be fixed and must not be designed around.
+Each candidate must change a different dimension — a skill, a hook,
+an agent profile, or the instruction count (an instruction added or
+removed). A pure reword (the same instruction count, nothing else
+changed) is rejected. A clean mechanical "reword" test is impossible
+(an edited line is indistinguishable from a new line), so the
+instruction count is the line drawn. Candidates are deduped by
+instructions hash and by hypothesis against the store and the
+archive, and the rejection names the duplicate. Already-tested
+hypotheses with their scores are in the prompt (newest 10), so the
+proposer does not repeat them. `proposerNotes` is required, never
+blank: it must state the evidence that motivated the change, and a
+candidate with a blank note is rejected.
+
+**Telemetry.** Each task report now carries real turns (repair rounds
+used), real tokens (worker + critic for that task), and a short worker
+trace (capped at 2000 characters: the rounds and what the worker last
+produced, so the proposer can see WHY a task failed). The trace is in
+the report and in the proposer prompt (capped at 500 characters
+there). Caps: traces 2000 chars, gate reasons 200 chars, Doctor
+results one entry per check.
+
+**Tasks.** rename-function is kept, with its checker fixed: the old
+checker failed on the substring "fetchData" inside
+"fetchDataInternal", so a CORRECT rename failed it — that is why
+rename-function failed in every genome. The checker now uses
+word-boundary matching (the target renamed, similar names unchanged,
+imports and call sites consistent). Three variants were added
+(rename across two files, rename with a similar decoy name, rename
+defined in one file and used in another) plus sort-lines and
+dedupe-lines. The live suite is now 13 tasks (11 training, 2
+holdouts: git-status-diff and pinned-constraint), the full suite 17
+tasks (3 holdouts: the 2 live ones plus real-secret-redactor). The
+live suite version bumped 1 → 2: scores before and after P8 are NOT
+comparable (different denominators), and the gate refuses to compare
+across versions through the cache key.
+
+**Persisted run report.** The report block used to depend on the
+session's run state, so it vanished after an app restart. The host
+now writes a small last-run pointer (`last-run.json` under the evolve
+directory: the promotable/best candidate id, the run summary, when it
+finished) whenever a run ends — success, stopped, blocked, or error.
+The pointer is written BEFORE the run state flips to not-running, so
+a finished run always has its pointer on disk already. The block loads
+from that pointer, falls back to the newest archived
+candidate when the last run produced none, and shows nothing (no
+crash) when the archive is empty. The gate reason still comes from
+the stored archive entry, not duplicated into the report. A candidate's
+3-seed aggregate is its best-known report: when it later becomes a
+parent, the runner reuses that aggregate instead of re-evaluating it
+at 1 seed, and never overwrites it with a 1-seed report.
+
+Honest limits: the Doctor's smoke test can time out on a cold plugin
+cache (the first Gradle run downloads the plugin); that is a failed
+check, not proof the toolchain is broken, and the real tasks retry
+with 10 minutes. The 3-seed confirmation reuses the seed-1
+evaluation, so a confirmation costs 2 fresh evaluations per side, not
+3. The cache only reuses a report when the role models are explicitly
+configured; with fallback models the parent is evaluated fresh every
+run. A candidate can only be promoted when it beats its parent by 2
+tasks on average — a parent that already scores 13/13 cannot be
+beaten, and its candidates are screened out, which is correct: there
+is nothing left to improve.
+
 ## Safety hardening (shipped with P3)
 
 Two more layers, added before the activation wiring shipped:

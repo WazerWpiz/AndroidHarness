@@ -64,7 +64,12 @@ class EvolveRunProgressTest {
                 parent.copy(
                     label = "gen-$n",
                     hypothesis = "Candidate $n.",
-                    instructions = parent.instructions + "Step $n: verify before claiming done.",
+                    // Accumulate: each candidate has more instructions than
+                    // any earlier one, so the dimension rule (an added
+                    // instruction) passes against whatever parent the
+                    // sampler picked.
+                    instructions = (1..n).map { "Step $it: verify before claiming done." },
+                    proposerNotes = "Evidence: candidate $n.",
                 )
             },
             worker = FakeModelCaller.correctWorker(),
@@ -79,7 +84,7 @@ class EvolveRunProgressTest {
             maxCandidates = host.settings.maxCandidates,
             stagnationLimit = host.settings.stagnationsBeforeStop,
         )
-        return EvolutionRunner(host.store, host.archive, ledger, host.settings, caller) { events += it }
+        return EvolutionRunner(host.store, host.archive, ledger, host.settings, caller, onProgress = { events += it }, delayFn = {})
     }
 
     @Test
@@ -144,6 +149,7 @@ class EvolveRunProgressTest {
                     label = "gen-after-failure",
                     hypothesis = "A second attempt after a bad proposal.",
                     instructions = listOf("Verify before claiming done."),
+                    proposerNotes = "Evidence: a second attempt after a bad proposal.",
                 )
             },
             worker = FakeModelCaller.correctWorker(),
@@ -162,27 +168,39 @@ class EvolveRunProgressTest {
     }
 
     @Test
-    fun `starting a run sets generation 1 with no finished candidates`() = runBlocking {
+    fun `starting a run begins with the Doctor check, then the first generation`() = runBlocking {
         host.store.save(Genome.baseline())
-        assertTrue(host.startRun(callerWithCounter(), File(root, "work")))
+        // The worker is slow (200 ms per call), so the Doctor's worker
+        // ping keeps the run in CHECKING long enough for the immediate
+        // read below to see it — the phase is otherwise a fast transient.
+        val caller = SlowWorkerCaller(callerWithCounter(), delayMs = 200)
+        assertTrue(host.startRun(caller, File(root, "work"), delayFn = {}))
         val state = host.runState.value
         assertNotNull(state)
         assertTrue(state!!.running)
-        assertEquals(1, state.generation)
+        // The Doctor preflight runs first, inside the run job: generation
+        // 0, phase CHECKING, until the runner takes over.
+        assertEquals(EvolveRunPhase.CHECKING, state.phase)
+        assertEquals(0, state.generation)
         assertTrue(state.finishedCandidates.isEmpty())
         assertNotNull(state.startedAtMs)
         assertEquals(host.settings.maxGenerations, state.maxGenerations)
         assertEquals(host.settings.maxCandidates, state.maxCandidates)
         assertEquals(host.settings.tokenBudget, state.tokenBudget)
         awaitSettled()
+        val done = host.runState.value
+        assertNotNull(done)
+        assertFalse(done!!.running)
+        assertEquals(EvolveRunPhase.DONE, done.phase)
+        assertTrue(done.generation >= 1)
     }
 
     @Test
     fun `cancelling a run stops it with no promotable candidate`() = runBlocking {
         host.store.save(Genome.baseline())
-        val caller = SlowWorkerCaller(callerWithCounter(), delayMs = 5_000)
-        assertTrue(host.startRun(caller, File(root, "work")))
-        withTimeout(30_000) {
+        val caller = SlowWorkerCaller(callerWithCounter(), delayMs = 1_000)
+        assertTrue(host.startRun(caller, File(root, "work"), delayFn = {}))
+        withTimeout(60_000) {
             host.runState.first { it != null && it.running && it.phase == EvolveRunPhase.EVALUATING }
         }
         host.cancelRun()
@@ -198,7 +216,7 @@ class EvolveRunProgressTest {
     fun `a run stopped by the generation cap reports the stop reason, never a fake percent`() = runBlocking {
         host.updateSettings(host.settings.copy(maxGenerations = 1))
         host.store.save(Genome.baseline())
-        assertTrue(host.startRun(callerWithCounter(), File(root, "work")))
+        assertTrue(host.startRun(callerWithCounter(), File(root, "work"), delayFn = {}))
         awaitSettled()
         val state = host.runState.value
         assertNotNull(state)

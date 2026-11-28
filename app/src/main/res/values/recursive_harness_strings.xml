@@ -41,7 +41,7 @@
     <string name="recursive_harness_progress_last_failure" translatable="false">Last failure: %1$s</string>
     <string name="recursive_harness_progress_finished" translatable="false">Finished candidates</string>
     <string name="recursive_harness_toolchain_ready" translatable="false">Build toolchain: installed (as reported by the test runner)</string>
-    <string name="recursive_harness_toolchain_missing" translatable="false">Build toolchain: not installed (as reported by the test runner) — the 4 real tasks will fail and the score ceiling is 8/12.</string>
+    <string name="recursive_harness_toolchain_missing" translatable="false">Build toolchain: not installed (as reported by the test runner) — runs use the lite suite (13 live tasks, no real tasks).</string>
     <string name="recursive_harness_report_title" translatable="false">Latest run report</string>
     <string name="recursive_harness_report_candidate" translatable="false">Candidate — %1$s</string>
     <string name="recursive_harness_report_parent" translatable="false">Parent %1$s — %2$s</string>
@@ -52,4 +52,17 @@
     <string name="recursive_harness_report_holdout" translatable="false">Holdout tasks — %1$d of %2$d passed</string>
     <string name="recursive_harness_report_task_passed" translatable="false">Passed</string>
     <string name="recursive_harness_report_task_failed" translatable="false">Failed</string>
+    <string name="recursive_harness_report_task_error" translatable="false">Error</string>
+    <string name="recursive_harness_report_task_skipped" translatable="false">Skipped</string>
+    <string name="recursive_harness_report_invalid" translatable="false">Invalid report: %1$s</string>
+    <string name="recursive_harness_report_seeds" translatable="false">Scores averaged over %1$d seeds; tasks shown are from seed 1.</string>
+    <string name="recursive_harness_progress_checking" translatable="false">Checking the toolchain and models…</string>
+    <string name="recursive_harness_doctor_title" translatable="false">Doctor preflight</string>
+    <string name="recursive_harness_doctor_description" translatable="false">Checks the toolchain, models and storage before a run. A failed model ping blocks the run; a missing toolchain switches it to the lite suite.</string>
+    <string name="recursive_harness_doctor_run" translatable="false">Run Doctor</string>
+    <string name="recursive_harness_doctor_checking" translatable="false">Checking…</string>
+    <string name="recursive_harness_doctor_fix" translatable="false">Fix</string>
+    <string name="recursive_harness_doctor_never" translatable="false">Not checked yet. The Doctor runs automatically before every run.</string>
+    <string name="recursive_harness_doctor_suite" translatable="false">Suite: %1$s</string>
+    <string name="recursive_harness_doctor_blocked" translatable="false">Blocked: %1$s</string>
 </resources>

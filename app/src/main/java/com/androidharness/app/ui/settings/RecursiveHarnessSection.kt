@@ -33,12 +33,17 @@ import com.androidharness.app.AppContainer
 import com.androidharness.app.R
 import com.androidharness.app.data.ChatModelChoice
 import com.androidharness.app.evolve.ArchiveEntry
+import com.androidharness.app.evolve.Doctor
+import com.androidharness.app.evolve.DoctorStatus
 import com.androidharness.app.evolve.EvalReport
+import com.androidharness.app.evolve.EvalSuite
 import com.androidharness.app.evolve.EvolveRole
 import com.androidharness.app.evolve.EvolveRunPhase
 import com.androidharness.app.evolve.GenomeBackup
+import com.androidharness.app.evolve.LastRun
 import com.androidharness.app.evolve.PromotionGate
 import com.androidharness.app.evolve.RealProjectEvaluator
+import com.androidharness.app.evolve.TaskStatus
 import com.androidharness.app.llm.effectiveApiKey
 import com.androidharness.app.ui.chat.components.ModelPickerSheet
 import java.io.File
@@ -85,12 +90,18 @@ internal fun RecursiveHarnessSection(container: AppContainer) {
     // Linux environment marker live, so no restart is needed to pick up
     // an install.
     var toolchainReady by remember { mutableStateOf(RealProjectEvaluator.commandRunner.toolchainReady) }
-    // Full run report (P7): the latest run's best candidate — the
-    // promotable one when there is one, else the newest archived
-    // candidate — with its per-task report and its parent's scores.
+    // Full run report (P7, persisted in P8): the latest run's best
+    // candidate — the promotable one when there is one, else the newest
+    // archived candidate — with its per-task report and its parent's
+    // scores. The pointer lives in storage (last-run.json), so the
+    // block loads after an app restart with no run this session.
     var reportEntry by remember { mutableStateOf<ArchiveEntry?>(null) }
     var reportCandidate by remember { mutableStateOf<EvalReport?>(null) }
     var reportParent by remember { mutableStateOf<EvalReport?>(null) }
+    var lastRun by remember { mutableStateOf<LastRun?>(null) }
+    // Doctor preflight (P8): the latest check results, for the checklist.
+    val doctor by host.doctorState.collectAsStateWithLifecycle(initialValue = null)
+    var doctorBusy by remember { mutableStateOf(false) }
 
     LaunchedEffect(runState?.promotableId) {
         val id = runState?.promotableId
@@ -123,17 +134,16 @@ internal fun RecursiveHarnessSection(container: AppContainer) {
                 host.store.load(active.genomeId)?.label?.ifBlank { active.genomeId }
             }
             toolchainReady = RealProjectEvaluator.commandRunner.toolchainReady
+            lastRun = host.store.lastRun()
         }
     }
 
-    // Full run report (P7): load the candidate's report and its parent's
-    // report once the run is done. The promotable candidate is the run's
-    // best; without one, the newest archived candidate is shown instead.
-    val reportGenomeId = if (runState != null && !running) {
-        runState?.promotableId ?: entries.firstOrNull()?.genomeId
-    } else {
-        null
-    }
+    // Full run report (P7, persisted in P8): the candidate comes from
+    // the stored last-run pointer, falling back to the newest archived
+    // candidate when the last run produced none; nothing when the
+    // archive is empty. The block's EXISTENCE no longer depends on the
+    // session's run state — only the P6 live-progress block does.
+    val reportGenomeId = lastRun?.candidateId ?: entries.firstOrNull()?.genomeId
     LaunchedEffect(reportGenomeId) {
         if (reportGenomeId == null) {
             reportEntry = null
@@ -328,7 +338,7 @@ internal fun RecursiveHarnessSection(container: AppContainer) {
 
             // Toolchain (P7): what the test runner reports — never a claim
             // that the toolchain was verified working. When it is missing,
-            // the 4 real tasks fail and the score ceiling is 8/12.
+            // the run uses the lite suite (13 live tasks, no real tasks).
             Text(
                 stringResource(
                     if (toolchainReady) R.string.recursive_harness_toolchain_ready
@@ -337,6 +347,146 @@ internal fun RecursiveHarnessSection(container: AppContainer) {
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+
+            // Doctor preflight (P8): the checklist from the last run or
+            // the last manual check. Each row shows what was checked and
+            // how it came out; a Fix button appears where a fix exists
+            // and reuses the existing flows — the Linux environment
+            // install/update for toolchain items, the model picker for
+            // key and ping items. A failed model ping blocks a run; a
+            // missing toolchain switches it to the lite suite.
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(
+                        stringResource(R.string.recursive_harness_doctor_title),
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(
+                        onClick = {
+                            if (doctorBusy || running) return@TextButton
+                            val caller = host.modelCaller
+                            if (caller == null) {
+                                localError = context.getString(R.string.recursive_harness_run_failed)
+                                return@TextButton
+                            }
+                            doctorBusy = true
+                            localError = null
+                            scope.launch {
+                                try {
+                                    withContext(Dispatchers.Default) {
+                                        host.runDoctor(caller, File(context.filesDir, "evolve/work"))
+                                    }
+                                } catch (e: CancellationException) {
+                                    throw e
+                                } catch (e: Exception) {
+                                    localError = e.message
+                                } finally {
+                                    doctorBusy = false
+                                }
+                            }
+                        },
+                        enabled = !doctorBusy && !running,
+                    ) {
+                        Text(
+                            stringResource(
+                                if (doctorBusy) R.string.recursive_harness_doctor_checking
+                                else R.string.recursive_harness_doctor_run,
+                            ),
+                        )
+                    }
+                }
+                val doctorResult = doctor
+                if (doctorResult == null) {
+                    Text(
+                        stringResource(R.string.recursive_harness_doctor_never),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                } else {
+                    Text(
+                        context.getString(
+                            R.string.recursive_harness_doctor_suite,
+                            if (doctorResult.suiteId == EvalSuite.LITE.suiteId) "lite" else "full",
+                        ),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    doctorResult.blockReason?.let {
+                        Text(
+                            context.getString(R.string.recursive_harness_doctor_blocked, it),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                    doctorResult.checks.forEach { check ->
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text(
+                                buildString {
+                                    append(check.title).append(" — ")
+                                    append(
+                                        when (check.status) {
+                                            DoctorStatus.PASS -> "OK"
+                                            DoctorStatus.FAIL -> "failed"
+                                            DoctorStatus.WARN -> "warning"
+                                            DoctorStatus.UNKNOWN -> "unknown"
+                                        },
+                                    )
+                                    check.value?.let { append(" (").append(it).append(")") }
+                                    if (check.detail.isNotBlank()) append(": ").append(check.detail.take(200))
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.weight(1f),
+                            )
+                            if (check.status == DoctorStatus.FAIL || check.status == DoctorStatus.WARN) {
+                                val role = Doctor.roleForCheck(check.id)
+                                when {
+                                    Doctor.isToolchainCheck(check.id) -> TextButton(
+                                        onClick = {
+                                            scope.launch {
+                                                try {
+                                                    withContext(Dispatchers.IO) {
+                                                        val linuxEnv = container.linuxEnv
+                                                        if (!linuxEnv.isReady) {
+                                                            linuxEnv.install(linuxEnv.fullPackages).getOrThrow()
+                                                        } else {
+                                                            linuxEnv.updateEnvironment()
+                                                        }
+                                                    }
+                                                    refresh()
+                                                } catch (e: CancellationException) {
+                                                    throw e
+                                                } catch (e: Exception) {
+                                                    localError = e.message
+                                                }
+                                            }
+                                        },
+                                        enabled = !running,
+                                    ) {
+                                        Text(stringResource(R.string.recursive_harness_doctor_fix))
+                                    }
+                                    role != null -> TextButton(
+                                        onClick = { pickingRole = role },
+                                        enabled = !running,
+                                    ) {
+                                        Text(stringResource(R.string.recursive_harness_doctor_fix))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
 
             // Run controls: one evolution run, then an approval card for the winner.
             // The run lives in the host (app scope): leaving this screen does
@@ -391,6 +541,7 @@ internal fun RecursiveHarnessSection(container: AppContainer) {
                                 append(" · ")
                                 append(
                                     when (progress.phase) {
+                                        EvolveRunPhase.CHECKING -> context.getString(R.string.recursive_harness_progress_checking)
                                         EvolveRunPhase.PROPOSING -> context.getString(R.string.recursive_harness_progress_proposing)
                                         EvolveRunPhase.EVALUATING -> context.getString(R.string.recursive_harness_progress_evaluating)
                                         EvolveRunPhase.SCORING -> context.getString(R.string.recursive_harness_progress_scoring)
@@ -471,12 +622,16 @@ internal fun RecursiveHarnessSection(container: AppContainer) {
                     }
                 }
             }
-            // Full run report (P7): one candidate at a time, at most 12
-            // tasks — the promotable candidate when there is one, else the
-            // newest archived candidate. No invented numbers: parent scores
-            // come from the parent's stored report, or the block says the
-            // parent was never evaluated.
-            if (reportEntry != null && runState != null && !running) {
+            // Full run report (P7, persisted in P8): one candidate at a
+            // time, at most 17 tasks — the promotable candidate when
+            // there is one, else the newest archived candidate. The
+            // candidate comes from the stored last-run pointer, so the
+            // block is there after an app restart with no run this
+            // session. No invented numbers: parent scores come from the
+            // parent's stored report, or the block says the parent was
+            // never evaluated. An INVALID report is marked as such and
+            // is never a promotion candidate.
+            if (reportEntry != null) {
                 val entry = reportEntry!!
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text(
@@ -498,6 +653,26 @@ internal fun RecursiveHarnessSection(container: AppContainer) {
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
+                        if (!candidate.valid) {
+                            Text(
+                                context.getString(
+                                    R.string.recursive_harness_report_invalid,
+                                    candidate.invalidReason ?: "",
+                                ),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                        }
+                        if (candidate.seeds.size > 1) {
+                            Text(
+                                context.getString(
+                                    R.string.recursive_harness_report_seeds,
+                                    candidate.seeds.size,
+                                ),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                     }
                     if (reportParent != null) {
                         Text(
@@ -541,8 +716,12 @@ internal fun RecursiveHarnessSection(container: AppContainer) {
                                         append(task.taskId).append(" — ")
                                         append(
                                             context.getString(
-                                                if (task.passed) R.string.recursive_harness_report_task_passed
-                                                else R.string.recursive_harness_report_task_failed,
+                                                when (task.resolvedStatus) {
+                                                    TaskStatus.PASS -> R.string.recursive_harness_report_task_passed
+                                                    TaskStatus.FAIL -> R.string.recursive_harness_report_task_failed
+                                                    TaskStatus.ERROR -> R.string.recursive_harness_report_task_error
+                                                    TaskStatus.SKIPPED -> R.string.recursive_harness_report_task_skipped
+                                                },
                                             ),
                                         )
                                         if (task.detail.isNotBlank()) append(" — ").append(task.detail.take(200))
@@ -567,8 +746,12 @@ internal fun RecursiveHarnessSection(container: AppContainer) {
                                         append(task.taskId).append(" — ")
                                         append(
                                             context.getString(
-                                                if (task.passed) R.string.recursive_harness_report_task_passed
-                                                else R.string.recursive_harness_report_task_failed,
+                                                when (task.resolvedStatus) {
+                                                    TaskStatus.PASS -> R.string.recursive_harness_report_task_passed
+                                                    TaskStatus.FAIL -> R.string.recursive_harness_report_task_failed
+                                                    TaskStatus.ERROR -> R.string.recursive_harness_report_task_error
+                                                    TaskStatus.SKIPPED -> R.string.recursive_harness_report_task_skipped
+                                                },
                                             ),
                                         )
                                         if (task.detail.isNotBlank()) append(" — ").append(task.detail.take(200))

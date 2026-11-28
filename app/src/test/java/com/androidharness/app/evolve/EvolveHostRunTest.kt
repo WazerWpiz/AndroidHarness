@@ -47,17 +47,26 @@ class EvolveHostRunTest {
     @Test
     fun `a run through the host produces a promotable candidate`() = runBlocking {
         host.store.save(Genome.baseline())
+        // P8: the worker is imperfect under the parent and correct
+        // under the candidate, so the candidate exceeds the parent;
+        // and the candidate carries proposerNotes, or the proposer
+        // refuses it for missing evidence.
         val caller = FakeModelCaller(
             proposerGenome = { parent ->
                 parent.copy(
                     label = "Re-read",
                     hypothesis = "Re-reading cuts false completion.",
-                    instructions = listOf("Re-read every changed site."),
+                    instructions = listOf("Re-read every changed site.", "Verify before claiming done."),
+                    proposerNotes = "Evidence: the parent over-renames fetchDataInternal and mis-sorts; a verify step should stop both.",
                 )
             },
-            worker = FakeModelCaller.correctWorker(),
+            workerSystem = { system, user ->
+                val w = if ("Verify before claiming done" in system) FakeModelCaller.correctWorker()
+                else FakeModelCaller.imperfectWorker()
+                w(user)
+            },
         )
-        assertTrue(host.startRun(caller, File(root, "work")))
+        assertTrue(host.startRun(caller, File(root, "work"), delayFn = {}))
         awaitSettled()
         val state = host.runState.value
         assertNotNull(state)

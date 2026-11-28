@@ -7,9 +7,8 @@ import kotlinx.coroutines.CancellationException
  * The real-project evaluator (P4): the same DGM/Voyager loop as
  * LiveEvaluator — the worker, running under the candidate's instructions
  * and skills, does the benchmark tasks in a scratch workspace, with up
- * to 3 repair rounds fed by the checker's feedback, a fixed checker,
- * then a critic second opinion; a task counts only when the checker AND
- * the critic pass — but the benchmark is the real AndroidHarness project
+ * to 3 repair rounds fed by the checker's feedback, then a fixed
+ * checker — but the benchmark is the real AndroidHarness project
  * itself instead of toy files.
  *
  * Each task is a minimal JVM Gradle project assembled from verbatim
@@ -23,12 +22,22 @@ import kotlinx.coroutines.CancellationException
  * first, so the worker cannot pass by editing the test instead of the
  * fix — the fix is the only file it may change.
  *
+ * P8: the checker is fully deterministic (Gradle exit 0 plus the
+ * guards), so the critic is SKIPPED for real tasks — no model judges
+ * them and no critic tokens are spent. Like the live evaluator, every
+ * task reports a status (PASS/FAIL/ERROR/SKIPPED); infra failures are
+ * ERROR and are retried, with one exception: a Gradle timeout is
+ * retried only once, because each retry costs up to 10 minutes of wall
+ * time. When the toolchain is not installed the tasks are SKIPPED (the
+ * runner normally never calls this suite then — the Doctor selects the
+ * lite suite instead — but a direct call still fails honestly).
+ *
  * Honest limits: the real suite needs the optional Linux toolchain
  * (openjdk-21 + gradle, installed from Settings); without it every real
- * task fails with a clear detail and the run continues on the live suite
- * alone — never a fake pass. On-phone Gradle is slow and battery-heavy:
+ * task is SKIPPED and the run continues on the live suite alone — never
+ * a fake pass. On-phone Gradle is slow and battery-heavy:
  * the first run downloads the Kotlin plugin, so each command may take up
- * to 10 minutes; a timeout is a task failure, never a hang. The
+ * to 10 minutes; a timeout is a task ERROR, never a hang. The
  * snapshots are frozen at P4 time; if a real file changes, regenerate
  * them with scripts/gen-real-project-tasks.py. The Gradle test JVM
  * compiles and runs worker-written code as the app user, the same trust
@@ -42,6 +51,9 @@ object RealProjectEvaluator {
 
     /** One Gradle test command may take this long; slower is a task failure, never a hang. */
     const val TEST_COMMAND_TIMEOUT_MS = 10 * 60 * 1000
+
+    /** A Gradle timeout is retried once (2 attempts total): each retry costs up to 10 minutes. */
+    const val MAX_GRADLE_TIMEOUT_ATTEMPTS = 2
 
     /** Most characters of one file ever held in memory for a prompt listing. */
     private const val DESCRIBE_MAX_CHARS = 8_000
@@ -281,143 +293,210 @@ object RealProjectEvaluator {
         }
     }
 
-    private suspend fun criticCheck(
-        caller: EvolveModelCaller,
+    /**
+     * One attempt at one real task: worker rounds, then the fixed
+     * checker (guarded files + the real Gradle test). The checker is
+     * fully deterministic, so there is no critic call (P8). A worker
+     * call that fails is ERROR (infra, retryable); a Gradle timeout is
+     * ERROR too, but it is retried only once — each retry costs up to
+     * 10 minutes of wall time. A Gradle exit != 0 is FAIL: the build
+     * ran and the test failed, which is the genome's work, not infra.
+     */
+    private data class TaskOutcome(
+        val result: TaskResult,
+        val workerTokens: Long,
+        val workerModel: String,
+    )
+
+    private suspend fun runTaskOnce(
+        genome: Genome,
         task: RealTask,
-        before: String,
-        after: String,
-    ): Triple<Boolean, String, Pair<Long, Long>> {
-        val result = try {
-            caller.complete(
-                EvolveRole.CRITIC,
-                "You are a strict code reviewer. Answer with exactly one line: PASS or FAIL: <reason>. " +
-                    "Judge only whether the produced files satisfy the task. Do not re-do the work.",
-                "Task: ${task.title}\n${task.prompt}\n\nBefore:\n$before\n\nAfter (what the worker produced):\n$after",
-                maxOutputTokens = 512,
-            )
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            return Triple(false, "critic call failed: ${e.message}", 0L to 0L)
+        dir: File,
+        caller: EvolveModelCaller,
+    ): TaskOutcome {
+        var reason: String? = null
+        var rounds = 0
+        var feedback = ""
+        var workerTokens = 0L
+        var workerModel = ""
+        var lastWorkerText: String? = null
+        while (rounds < MAX_ROUNDS) {
+            rounds++
+            val user = buildString {
+                append(task.prompt).append("\n\nCurrent workspace files:\n").append(describeFiles(dir))
+                if (feedback.isNotBlank()) append("\nPrevious attempt failed: ").append(feedback).append("\nFix it.")
+            }
+            val call = try {
+                caller.complete(EvolveRole.WORKER, workerSystem(genome), user)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                return TaskOutcome(
+                    TaskResult(
+                        taskId = task.id, passed = false,
+                        detail = "worker call failed: ${e.message}".take(200),
+                        turns = rounds, tokens = workerTokens, holdout = task.isHoldout,
+                        status = TaskStatus.ERROR,
+                        trace = "rounds=$rounds; worker call failed: ${e.message}".take(LiveEvaluator.MAX_TRACE_CHARS),
+                    ),
+                    workerTokens, workerModel,
+                )
+            }
+            workerTokens += call.promptTokens + call.completionTokens
+            if (call.model.isNotBlank()) workerModel = call.model
+            lastWorkerText = call.text
+            val blocks = LiveEvaluator.parseFileBlocks(call.text)
+            if (blocks.isEmpty()) {
+                reason = "worker produced no file blocks"
+                feedback = "You produced no file blocks. Output each changed file as ```<relative path>\n<full new contents>\n``` and nothing else."
+                continue
+            }
+            blocks.forEach { (path, contents) ->
+                File(dir, path).apply { parentFile?.mkdirs(); writeText(contents) }
+            }
+            val checkResult = try {
+                task.check(dir)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                return TaskOutcome(
+                    TaskResult(
+                        taskId = task.id, passed = false,
+                        detail = "checker failed: ${e.message}".take(200),
+                        turns = rounds, tokens = workerTokens, holdout = task.isHoldout,
+                        status = TaskStatus.ERROR,
+                        trace = "rounds=$rounds; checker threw: ${e.message}".take(LiveEvaluator.MAX_TRACE_CHARS),
+                    ),
+                    workerTokens, workerModel,
+                )
+            }
+            reason = checkResult
+            if (reason == null) break
+            // A Gradle timeout is infra, not the worker's work: re-asking
+            // the worker to repair it burns a repair round and up to 10
+            // minutes of wall time for nothing. The attempt loop in
+            // evaluate() retries the command once.
+            if ("timed out" in reason) break
+            feedback = reason
         }
-        val tokens = result.promptTokens + result.completionTokens
-        val first = result.text.trim().lineSequence().firstOrNull().orEmpty()
-        return if (first.startsWith("PASS")) Triple(true, "critic passed", 0L to tokens)
-        else Triple(false, "critic: ${first.ifBlank { "no verdict" }.take(200)}", 0L to tokens)
+        val detail = reason ?: ""
+        val passed = reason == null
+        // A Gradle timeout is infra (ERROR); any other checker failure
+        // is the genome's work (FAIL). The timeout text is the one
+        // runGradleTest writes, so match on it.
+        val status = when {
+            passed -> TaskStatus.PASS
+            "timed out" in detail -> TaskStatus.ERROR
+            else -> TaskStatus.FAIL
+        }
+        val trace = buildString {
+            append("rounds=").append(rounds)
+            lastWorkerText?.let { append("; worker output: ").append(it.take(1_200)) }
+            append("; result: ").append(detail)
+        }.take(LiveEvaluator.MAX_TRACE_CHARS)
+        return TaskOutcome(
+            TaskResult(
+                taskId = task.id, passed = passed, detail = detail.take(200),
+                turns = rounds, tokens = workerTokens, holdout = task.isHoldout,
+                status = status, trace = trace,
+            ),
+            workerTokens, workerModel,
+        )
     }
 
     /**
      * Runs the whole suite for one genome. Returns the report plus the
      * token counts, so the runner can charge them to the ledger. When the
-     * build toolchain is not installed, every task fails with the
-     * toolchain detail and the worker is never called: no fake scores,
-     * and the run continues on the live suite alone.
+     * build toolchain is not installed, every task is SKIPPED and the
+     * worker is never called: no fake scores, and the run continues on
+     * the live suite alone. [delayFn] is the real delay in production
+     * and a no-op in tests.
      */
     suspend fun evaluate(
         genome: Genome,
         caller: EvolveModelCaller,
         workDir: File,
+        seed: Int = 1,
+        delayFn: suspend (Long) -> Unit = { kotlinx.coroutines.delay(it) },
     ): Pair<EvalReport, Pair<Long, Long>> {
         val started = System.currentTimeMillis()
         val envPin = "jvm/${System.getProperty("os.name")}/${System.getProperty("os.arch")}"
         if (!commandRunner.toolchainReady) {
             val results = tasks.map { task ->
-                TaskResult(taskId = task.id, passed = false, detail = TOOLCHAIN_MISSING_DETAIL, holdout = task.isHoldout)
+                TaskResult(
+                    taskId = task.id, passed = false, detail = TOOLCHAIN_MISSING_DETAIL,
+                    holdout = task.isHoldout, status = TaskStatus.SKIPPED,
+                    trace = "not attempted: $TOOLCHAIN_MISSING_DETAIL",
+                )
             }
-            val holdout = results.filter { it.holdout }
+            val (valid, invalidReason) = EvalReport.validityOf(results)
             val report = EvalReport(
                 genomeId = genome.id,
                 suiteId = SUITE_ID,
                 suiteVersion = SUITE_VERSION,
-                seeds = listOf(1),
+                seeds = listOf(seed),
                 tasks = results,
                 successRate = 0.0,
                 tokensPerSuccess = 0.0,
                 toolValidity = 1.0,
-                meanTurns = 1.0,
+                meanTurns = 0.0,
                 safetyViolations = 0,
                 wallMs = System.currentTimeMillis() - started,
                 modelPin = "real/toolchain-missing",
                 envPin = envPin,
-                holdoutScore = if (holdout.isEmpty()) null else 0.0,
+                holdoutScore = 0.0,
+                meanPassedTasks = 0.0,
+                valid = valid,
+                invalidReason = invalidReason,
             )
             return report to (0L to 0L)
         }
         var workerTokens = 0L
-        var criticTokens = 0L
         var modelPin = "real"
-        val results = tasks.map { task ->
+        val results = mutableListOf<TaskResult>()
+        tasks.forEachIndexed { index, task ->
+            if (index > 0) delayFn(LiveEvaluator.INTER_TASK_DELAY_MS)
             val dir = File(workDir, task.id).apply { mkdirs() }
             task.setup(dir)
-            val before = describeFiles(dir)
-            var reason: String? = null
-            var rounds = 0
-            var feedback = ""
-            while (rounds < MAX_ROUNDS) {
-                rounds++
-                val user = buildString {
-                    append(task.prompt).append("\n\nCurrent workspace files:\n").append(describeFiles(dir))
-                    if (feedback.isNotBlank()) append("\nPrevious attempt failed: ").append(feedback).append("\nFix it.")
-                }
-                val call = try {
-                    caller.complete(EvolveRole.WORKER, workerSystem(genome), user)
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    reason = "worker call failed: ${e.message}"
-                    break
-                }
-                workerTokens += call.promptTokens + call.completionTokens
-                if (call.model.isNotBlank()) modelPin = "real/${call.model}"
-                val blocks = LiveEvaluator.parseFileBlocks(call.text)
-                if (blocks.isEmpty()) {
-                    reason = "worker produced no file blocks"
-                    feedback = "You produced no file blocks. Output each changed file as ```<relative path>\n<full new contents>\n``` and nothing else."
-                    continue
-                }
-                blocks.forEach { (path, contents) ->
-                    File(dir, path).apply { parentFile?.mkdirs(); writeText(contents) }
-                }
-                reason = try {
-                    task.check(dir)
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    "checker failed: ${e.message}"
-                }
-                if (reason == null) break
-                feedback = reason
+            var attempt = 0
+            var outcome: TaskOutcome
+            while (true) {
+                attempt++
+                outcome = runTaskOnce(genome, task, dir, caller)
+                if (outcome.result.resolvedStatus != TaskStatus.ERROR) break
+                // A Gradle timeout is retried only once: each retry costs
+                // up to 10 minutes of wall time. Other infra errors get
+                // the full 3 retries.
+                val maxAttempts = if ("timed out" in outcome.result.detail) MAX_GRADLE_TIMEOUT_ATTEMPTS
+                else LiveEvaluator.MAX_ATTEMPTS
+                if (attempt >= maxAttempts) break
+                delayFn(LiveEvaluator.retryWaitMs(outcome.result.detail, attempt))
             }
-            var detail = reason ?: ""
-            var passed = reason == null
-            if (passed) {
-                val (criticOk, criticReason, criticUsed) = criticCheck(caller, task, before, describeFiles(dir))
-                criticTokens += criticUsed.second
-                if (!criticOk) {
-                    passed = false
-                    detail = criticReason
-                }
-            }
-            TaskResult(taskId = task.id, passed = passed, detail = detail, holdout = task.isHoldout)
+            workerTokens += outcome.workerTokens
+            if (outcome.workerModel.isNotBlank()) modelPin = "real/${outcome.workerModel}"
+            results += outcome.result
         }
-        val holdout = results.filter { it.holdout }
-        val successes = results.count { it.passed }
+        val (valid, invalidReason) = EvalReport.validityOf(results)
+        val passed = results.count { it.resolvedStatus == TaskStatus.PASS }
         val report = EvalReport(
             genomeId = genome.id,
             suiteId = SUITE_ID,
             suiteVersion = SUITE_VERSION,
-            seeds = listOf(1),
+            seeds = listOf(seed),
             tasks = results,
-            successRate = successes.toDouble() / results.size,
-            tokensPerSuccess = if (successes == 0) 0.0 else (workerTokens + criticTokens).toDouble() / successes,
+            successRate = EvalReport.successRateOf(results),
+            tokensPerSuccess = if (passed == 0) 0.0 else workerTokens.toDouble() / passed,
             toolValidity = 1.0,
-            meanTurns = 1.0,
+            meanTurns = results.map { it.turns }.average().takeIf { it.isFinite() } ?: 0.0,
             safetyViolations = 0,
             wallMs = System.currentTimeMillis() - started,
             modelPin = modelPin,
             envPin = envPin,
-            holdoutScore = if (holdout.isEmpty()) null else holdout.count { it.passed }.toDouble() / holdout.size,
+            holdoutScore = EvalReport.holdoutScoreOf(results),
+            meanPassedTasks = passed.toDouble(),
+            valid = valid,
+            invalidReason = invalidReason,
         )
-        return report to (workerTokens to criticTokens)
+        return report to (workerTokens to 0L)
     }
 }

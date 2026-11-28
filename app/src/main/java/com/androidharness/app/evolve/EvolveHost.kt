@@ -12,6 +12,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -19,7 +20,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 /** What the Settings screen shows for the latest evolution run. */
-enum class EvolveRunPhase { PROPOSING, EVALUATING, SCORING, DONE }
+enum class EvolveRunPhase { CHECKING, PROPOSING, EVALUATING, SCORING, DONE }
 
 /** One candidate that finished evaluation, with the score it really got. */
 data class FinishedCandidate(
@@ -117,18 +118,44 @@ class EvolveHost(val store: GenomeStore, val archive: Archive) {
     val runState: StateFlow<EvolveRunState?> = _runState.asStateFlow()
     private var runJob: Job? = null
 
+    /** The latest Doctor preflight result, for the checklist in Settings. */
+    private val _doctorState = MutableStateFlow<DoctorResult?>(null)
+    val doctorState: StateFlow<DoctorResult?> = _doctorState.asStateFlow()
+
+    /**
+     * Runs the Doctor preflight on demand (the checklist's Run button)
+     * and stores the result. The run itself calls this too, first thing.
+     */
+    suspend fun runDoctor(caller: EvolveModelCaller, workDir: File = File(store.root, "work")): DoctorResult {
+        val doctor = Doctor.run(caller, RealProjectEvaluator.commandRunner, workDir)
+        _doctorState.value = doctor
+        return doctor
+    }
+
     /**
      * Starts a full run in the app-scoped [runScope]: navigating away from
      * Settings no longer cancels it. Returns false when a run is already
      * going. The run survives leaving the screen; it stops only if the app
      * process itself is killed.
+     *
+     * The Doctor preflight runs first, inside the run job: if a model
+     * ping fails the run is blocked with the exact reason and no
+     * evaluation starts; if the toolchain is missing the run uses the
+     * lite suite. The last-run pointer is written when the run ends —
+     * success, stopped, blocked, or error — so the report block loads
+     * from storage after an app restart.
      */
-    fun startRun(caller: EvolveModelCaller, workDir: File = File(store.root, "work")): Boolean {
+    fun startRun(
+        caller: EvolveModelCaller,
+        workDir: File = File(store.root, "work"),
+        /** The delay the evaluators use between tasks and before retries; real in production, a no-op in tests. */
+        delayFn: suspend (Long) -> Unit = { delay(it) },
+    ): Boolean {
         if (_runState.value?.running == true) return false
         _runState.value = EvolveRunState(
             running = true,
-            phase = EvolveRunPhase.PROPOSING,
-            generation = 1,
+            phase = EvolveRunPhase.CHECKING,
+            generation = 0,
             maxGenerations = settings.maxGenerations,
             maxCandidates = settings.maxCandidates,
             tokenBudget = settings.tokenBudget,
@@ -136,6 +163,23 @@ class EvolveHost(val store: GenomeStore, val archive: Archive) {
         )
         runJob = runScope.launch {
             try {
+                val doctor = runDoctor(caller, workDir)
+                if (doctor.blocksRun) {
+                    val reason = doctor.blockReason ?: "Doctor preflight blocked the run."
+                    // The pointer is written BEFORE the state flips to
+                    // not-running: anything that sees a finished run must
+                    // already see the pointer (otherwise the report block
+                    // reads a stale pointer, or none at all).
+                    runCatching {
+                        store.saveLastRun(LastRun(null, reason, System.currentTimeMillis()))
+                    }.onFailure { /* The pointer is best-effort; a failed write must not fail the run. */ }
+                    _runState.update {
+                        it?.copy(running = false, error = reason, phase = EvolveRunPhase.DONE)
+                            ?: EvolveRunState(running = false, error = reason, phase = EvolveRunPhase.DONE)
+                    }
+                    return@launch
+                }
+                val suite = if (doctor.toolchainReady) EvalSuite.FULL else EvalSuite.LITE
                 val parent = store.active()?.let { store.load(it.genomeId) }
                     ?: store.load(Genome.baseline().id)
                     ?: store.save(Genome.baseline())
@@ -160,7 +204,7 @@ class EvolveHost(val store: GenomeStore, val archive: Archive) {
                         )
                     }
                 }
-                val result = newRun(caller, workDir, onProgress).run(parent, workDir)
+                val result = newRun(caller, workDir, onProgress, doctor, suite, delayFn).run(parent, workDir)
                 val best = result.generations.flatMap { it.reports }.maxByOrNull { it.successRate }
                 val summary = buildString {
                     append(result.generations.size).append(" generation(s), ")
@@ -171,6 +215,12 @@ class EvolveHost(val store: GenomeStore, val archive: Archive) {
                     if (failures.isNotEmpty()) append(" — proposals failed: ").append(failures.joinToString("; ").take(200))
                     if (result.promotableId == null) append(" — No candidate met the promotion bar.")
                 }
+                // The pointer is written BEFORE the state flips to
+                // not-running (see the blocked path above): a finished
+                // run must already have its pointer on disk.
+                runCatching {
+                    store.saveLastRun(LastRun(result.promotableId, summary, System.currentTimeMillis()))
+                }.onFailure { /* The pointer is best-effort; a failed write must not fail the run. */ }
                 _runState.update {
                     it?.copy(
                         running = false, summary = summary, promotableId = result.promotableId,
@@ -181,12 +231,18 @@ class EvolveHost(val store: GenomeStore, val archive: Archive) {
                     )
                 }
             } catch (e: CancellationException) {
+                runCatching {
+                    store.saveLastRun(LastRun(null, "Run stopped.", System.currentTimeMillis()))
+                }.onFailure { /* The pointer is best-effort; a failed write must not fail the run. */ }
                 _runState.update {
                     it?.copy(running = false, summary = "Run stopped.", phase = EvolveRunPhase.DONE)
                         ?: EvolveRunState(running = false, summary = "Run stopped.", phase = EvolveRunPhase.DONE)
                 }
                 throw e
             } catch (e: Exception) {
+                runCatching {
+                    store.saveLastRun(LastRun(null, "Run failed: ${e.message}", System.currentTimeMillis()))
+                }.onFailure { /* The pointer is best-effort; a failed write must not fail the run. */ }
                 _runState.update {
                     it?.copy(running = false, error = e.message, phase = EvolveRunPhase.DONE)
                         ?: EvolveRunState(running = false, error = e.message, phase = EvolveRunPhase.DONE)
@@ -211,6 +267,9 @@ class EvolveHost(val store: GenomeStore, val archive: Archive) {
         caller: EvolveModelCaller,
         workDir: File = File(store.root, "work"),
         onProgress: (EvolveRunProgress) -> Unit = {},
+        doctor: DoctorResult? = null,
+        suite: EvalSuite? = null,
+        delayFn: suspend (Long) -> Unit = { delay(it) },
     ): EvolutionRunner {
         val ledger = BudgetLedger(
             maxTokens = settings.tokenBudget,
@@ -219,7 +278,7 @@ class EvolveHost(val store: GenomeStore, val archive: Archive) {
             maxCandidates = settings.maxCandidates,
             stagnationLimit = settings.stagnationsBeforeStop,
         )
-        return EvolutionRunner(store, archive, ledger, settings, caller, onProgress)
+        return EvolutionRunner(store, archive, ledger, settings, caller, onProgress, doctor, suite, delayFn)
     }
 
     fun tools(): List<Tool> = listOf(

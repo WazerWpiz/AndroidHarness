@@ -31,6 +31,8 @@ object LlmProposer {
 Rules for the genome you write:
 - Output EXACTLY ONE JSON object matching the genome schema below and nothing else. No prose, no markdown fences, no commentary.
 - Change ONE thing relative to the parent, and say why in "hypothesis" (one sentence, max 500 characters).
+- Change a DIFFERENT dimension, not just a reword: change a skill, a hook, or an agent profile, or add/remove an instruction. A candidate that only rewords the parent's instructions — same instruction count, no skill, hook or agent change — is rejected.
+- "proposerNotes" is required, never blank: one or two sentences stating the EVIDENCE that motivated this change — which failing task, which pattern, what you saw. A candidate with blank proposerNotes is rejected.
 - "label" is short (max 80 characters). "instructions" is a list of plain instruction strings.
 - Skill names match [a-z0-9][a-z0-9-]{0,63}. Hook "event" must be one of: session.start, message.received, prompt.before, tool.before, tool.after, tool.failed, permission.request, notification, stop, subagent.start, subagent.stop, compact.before, session.end. Hook "timeout" is 1-600 seconds.
 - NEVER name, touch or disable the trusted core: GenomeStore, Archive, PromotionGate, EvalHarness, SafetyProbes, BudgetLedger, ShellPolicy, SecretRedactor, build files, signing keys, or the holdout suite. Never mention permissions, plugins, MCP servers or the sandbox.
@@ -45,12 +47,20 @@ Genome schema:
         archive: List<ArchiveEntry>,
         trainingTasks: List<EvalTaskSummary>,
         recurringHints: List<String> = emptyList(),
+        /** Why the parent's latest report is INVALID, when it is: the scores are then absent on purpose. */
+        parentReportInvalid: String? = null,
     ): String = buildString {
         append("Parent genome (JSON):\n")
         append(parent.canonical())
         append("\n\nParent evaluation:\n")
         if (parentReport == null) {
-            append("The parent has never been evaluated. Propose the single most useful first improvement.\n")
+            if (parentReportInvalid != null) {
+                append("The parent's latest report is INVALID ($parentReportInvalid) and is not a fair baseline: ")
+                append("its scores are withheld because they were measured with too many infra failures. ")
+                append("Propose the single most useful improvement anyway, and do not design around the infra failures.\n")
+            } else {
+                append("The parent has never been evaluated. Propose the single most useful first improvement.\n")
+            }
         } else {
             append("Success rate: %.0f%%".format(parentReport.successRate * 100))
             append(", holdout score (scalar only, tasks hidden): ")
@@ -58,14 +68,28 @@ Genome schema:
             append("\nFailing training tasks:\n")
             val failing = parentReport.tasks.filter { !it.passed && !it.holdout }
             if (failing.isEmpty()) append("- none; improve the weakest passing area instead\n")
-            failing.forEach { append("- ").append(it.taskId).append(": ").append(it.detail).append('\n') }
+            failing.forEach { task ->
+                // Agent failures are the genome's fault and can be fixed;
+                // infra failures are not and cannot — say so, so the
+                // proposer does not design around a rate limit.
+                val kind = when (task.resolvedStatus) {
+                    TaskStatus.FAIL -> "agent"
+                    TaskStatus.ERROR, TaskStatus.SKIPPED -> "infra"
+                    TaskStatus.PASS -> "agent"
+                }
+                append("- [").append(kind).append("] ").append(task.taskId).append(": ").append(task.detail)
+                if (task.trace.isNotBlank()) append(" — trace: ").append(task.trace.take(500))
+                append('\n')
+            }
+            append("Infra failures (rate limits, quota, timeouts, missing toolchain) are not the genome's fault ")
+            append("and you cannot fix them — do not design around them.\n")
             if (parentReport.safetyViolations > 0) {
                 append("WARNING: the parent has ${parentReport.safetyViolations} safety violations. ")
                 append("Your candidate must remove them; a candidate with any violation is vetoed.\n")
             }
         }
-        append("\nRecent archive stepping stones (newest first):\n")
-        archive.sortedByDescending { it.createdAt }.take(5).forEach {
+        append("\nAlready-tested hypotheses (newest first) — do not repeat these:\n")
+        archive.sortedByDescending { it.createdAt }.take(10).forEach {
             append("- ").append(it.genomeId).append(" [").append(it.status.name.lowercase()).append("] ")
             append(it.label.ifBlank { "unnamed" })
             it.successRate?.let { rate -> append(" %.0f%%".format(rate * 100)) }
@@ -91,6 +115,28 @@ Genome schema:
         return candidate.substring(start, end + 1)
     }
 
+    /**
+     * The dimension-change rule (P8): a candidate must change a skill,
+     * a hook, an agent profile, or the instruction count (an instruction
+     * added or removed). A pure reword — the same number of
+     * instructions, nothing else changed — is rejected, because it is
+     * not a new experiment. A mechanical "reword" test is impossible
+     * (an edited line is indistinguishable from a new line), so the
+     * instruction count is the line drawn, and the doc says so plainly.
+     */
+    fun dimensionChanged(parent: Genome, candidate: Genome): Boolean {
+        if (candidate.skills != parent.skills) return true
+        if (candidate.skillEnable != parent.skillEnable) return true
+        if (candidate.hooks != parent.hooks) return true
+        if (candidate.agents != parent.agents) return true
+        if (candidate.instructions.size != parent.instructions.size) return true
+        return false
+    }
+
+    /** The hash of a genome's instruction list, for dedupe. */
+    fun instructionsHash(genome: Genome): String =
+        Genome.sha256(genome.instructions.joinToString("\n"))
+
     suspend fun propose(
         caller: EvolveModelCaller,
         parent: Genome,
@@ -98,9 +144,13 @@ Genome schema:
         archive: List<ArchiveEntry>,
         trainingTasks: List<EvalTaskSummary>,
         recurringHints: List<String> = emptyList(),
+        /** The store, when the caller has one: dedupe checks the stored genomes, not just the archive. */
+        store: GenomeStore? = null,
+        /** Why the parent's latest report is INVALID, when it is (see [promptFor]). */
+        parentReportInvalid: String? = null,
     ): Proposed {
         val result = try {
-            caller.complete(EvolveRole.PROPOSER, SYSTEM, promptFor(parent, parentReport, archive, trainingTasks, recurringHints))
+            caller.complete(EvolveRole.PROPOSER, SYSTEM, promptFor(parent, parentReport, archive, trainingTasks, recurringHints, parentReportInvalid))
         } catch (e: CancellationException) {
             // Never swallow cancellation: a stopped run must stop, not burn
             // its remaining attempts as proposal failures.
@@ -125,6 +175,36 @@ Genome schema:
         }
         if (identified.canonical() == parent.canonical()) {
             return Proposed.Failed("proposed genome is identical to its parent")
+        }
+        if (!dimensionChanged(parent, identified)) {
+            return Proposed.Failed(
+                "proposed genome only rewords the parent's instructions: " +
+                    "change a skill, hook, agent profile, or add/remove an instruction",
+            )
+        }
+        if (identified.proposerNotes.isBlank()) {
+            return Proposed.Failed(
+                "proposerNotes is empty: say what evidence motivated the change — " +
+                    "which failing task or pattern — never a blank note",
+            )
+        }
+        // Dedupe (P8): an instructions hash or a hypothesis that already
+        // exists is not a new experiment. The store holds every genome;
+        // the archive holds the hypotheses of the ones that were
+        // evaluated. The reason names the duplicate.
+        val hash = instructionsHash(identified)
+        val hypothesis = identified.hypothesis.trim()
+        val stored = store?.list().orEmpty()
+        stored.firstOrNull { instructionsHash(it) == hash }?.let {
+            return Proposed.Failed("duplicate instructions of genome ${it.id}")
+        }
+        if (hypothesis.isNotBlank()) {
+            stored.firstOrNull { it.hypothesis.trim() == hypothesis }?.let {
+                return Proposed.Failed("duplicate hypothesis of genome ${it.id}")
+            }
+            archive.firstOrNull { it.hypothesis.trim() == hypothesis }?.let {
+                return Proposed.Failed("duplicate hypothesis of genome ${it.genomeId}")
+            }
         }
         return Proposed.Candidate(identified, result.promptTokens, result.completionTokens)
     }

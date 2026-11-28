@@ -30,6 +30,8 @@ object ProtectedPaths {
         "${APP}evolve/ShellTestCommandRunner.kt",
         "${APP}evolve/RealProjectTaskData.kt",
         "${APP}evolve/LlmProposer.kt",
+        "${APP}evolve/Doctor.kt",
+        "${APP}evolve/CriticVerdict.kt",
         "${APP}evolve/SafetyProbes.kt",
         "${APP}evolve/BudgetLedger.kt",
         "${APP}tools/ShellPolicy.kt",

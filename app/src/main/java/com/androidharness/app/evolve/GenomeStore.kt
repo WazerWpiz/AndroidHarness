@@ -33,12 +33,29 @@ internal object EvolveIo {
 }
 
 /**
+ * The last run's pointer (P8): which candidate the report block should
+ * show, and what the run produced. Written by [EvolveHost] when a run
+ * completes (success, stopped, or error — it records what the run
+ * actually produced), read back by the Settings screen so the report
+ * block survives an app restart. A null [candidateId] means the run
+ * produced no candidate to show (blocked, stopped, or failed): the
+ * screen then falls back to the newest archived candidate.
+ */
+@Serializable
+data class LastRun(
+    val candidateId: String? = null,
+    val summary: String = "",
+    val finishedAt: Long = 0L,
+)
+
+/**
  * Content-addressed home of every genome, under its own folder:
  *
  * ```
  * <root>/genomes/<id>/genome.json
  * <root>/reports/<id>.json
  * <root>/active.json
+ * <root>/last-run.json
  * ```
  *
  * The id is the hash of the content, so a genome can be found by its meaning and a
@@ -58,6 +75,7 @@ class GenomeStore(val root: File) {
     private val genomesDir = File(root, "genomes")
     private val reportsDir = File(root, "reports")
     private val activeFile = File(root, "active.json")
+    private val lastRunFile = File(root, "last-run.json")
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
     fun genomeDir(id: String): File {
@@ -122,5 +140,19 @@ class GenomeStore(val root: File) {
     fun report(genomeId: String): EvalReport? {
         val text = EvolveIo.read(File(reportsDir, "$genomeId.json")) ?: return null
         return runCatching { json.decodeFromString(EvalReport.serializer(), text) }.getOrNull()
+    }
+
+    /** Persist the last run's pointer (P8): what the run produced, for the report block after a restart. */
+    @Synchronized
+    fun saveLastRun(lastRun: LastRun) {
+        ProtectedPaths.requireWritable(lastRunFile.invariantSeparatorsPath)
+        EvolveIo.write(lastRunFile, json.encodeToString(LastRun.serializer(), lastRun))
+    }
+
+    /** The last run's pointer, or null when no run has ever finished. */
+    @Synchronized
+    fun lastRun(): LastRun? {
+        val text = EvolveIo.read(lastRunFile) ?: return null
+        return runCatching { json.decodeFromString(LastRun.serializer(), text) }.getOrNull()
     }
 }

@@ -60,6 +60,20 @@ class Archive(private val file: File, private val json: Json = Json { ignoreUnkn
         persist(entries().map { if (it.genomeId == genomeId) it.copy(status = status) else it })
     }
 
+    /**
+     * Replace one entry's recorded facts (P8): a candidate's scores are
+     * refined after its 3-seed confirmation, and a parent's scores are
+     * refreshed when its report is re-evaluated to a 3-seed aggregate.
+     * Without this the archive would show stale screening scores. The
+     * entry must already exist; the genome id and parent never change.
+     */
+    @Synchronized
+    fun update(entry: ArchiveEntry) {
+        val all = entries()
+        require(all.any { it.genomeId == entry.genomeId }) { "Genome ${entry.genomeId} is not in the archive." }
+        persist(all.map { if (it.genomeId == entry.genomeId) entry else it })
+    }
+
     /** Root first, [id] last. Empty when the id is unknown. */
     fun lineage(id: String, all: List<ArchiveEntry> = entries()): List<ArchiveEntry> {
         val byId = all.associateBy { it.genomeId }

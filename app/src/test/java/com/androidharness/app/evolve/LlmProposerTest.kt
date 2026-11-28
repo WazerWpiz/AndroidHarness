@@ -33,6 +33,7 @@ class LlmProposerTest {
             label = "gen-verify",
             hypothesis = "A verify line should help.",
             instructions = listOf("Verify before claiming done."),
+            proposerNotes = "Evidence: the parent claims done without evidence on verify-before-done.",
         )
         val caller = FakeModelCaller(
             proposerGenome = { candidate },
@@ -88,7 +89,7 @@ class LlmProposerTest {
     @Test
     fun `the proposer never sees holdout tasks`() {
         val view = LiveEvaluator.proposerView()
-        assertEquals(6, view.tasks.size)
+        assertEquals(11, view.tasks.size)
         assertTrue(view.tasks.none { it.isHoldout })
         assertTrue(LiveEvaluator.holdoutIds().containsAll(listOf("git-status-diff", "pinned-constraint")))
         val prompt = LlmProposer.promptFor(parent, null, emptyList(), view.tasks)
@@ -109,5 +110,161 @@ class LlmProposerTest {
         val prompt = LlmProposer.promptFor(parent, report, emptyList(), LiveEvaluator.proposerView().tasks)
         assertTrue("verify-before-done" in prompt)
         assertTrue("worker produced no file blocks" in prompt)
+    }
+
+    @Test
+    fun `the prompt classifies failures as agent or infra and says infra cannot be fixed`() {
+        val report = EvalReport(
+            genomeId = parent.id,
+            tasks = listOf(
+                TaskResult("rename-function", false, "old name fetchData is still present", status = TaskStatus.FAIL),
+                TaskResult("sort-lines", false, "worker call failed: quota exhausted", status = TaskStatus.ERROR),
+            ),
+            successRate = 0.0,
+        )
+        val prompt = LlmProposer.promptFor(parent, report, emptyList(), LiveEvaluator.proposerView().tasks)
+        assertTrue("[agent] rename-function" in prompt)
+        assertTrue("[infra] sort-lines" in prompt)
+        assertTrue("cannot fix them" in prompt)
+    }
+
+    @Test
+    fun `an invalid parent report is withheld from the proposer with an explicit note`() {
+        val prompt = LlmProposer.promptFor(
+            parent, null, emptyList(), LiveEvaluator.proposerView().tasks,
+            parentReportInvalid = "60% of tasks were ERROR/SKIPPED",
+        )
+        assertTrue("INVALID" in prompt)
+        assertTrue("not a fair baseline" in prompt)
+    }
+
+    @Test
+    fun `a candidate with blank proposerNotes is refused`() = runBlocking {
+        val candidate = parent.copy(
+            label = "gen-x",
+            hypothesis = "A verify line should help.",
+            instructions = listOf("Verify before claiming done."),
+        )
+        val caller = FakeModelCaller(proposerGenome = { candidate })
+        val proposed = LlmProposer.propose(
+            caller, parent, null, emptyList(), LiveEvaluator.proposerView().tasks,
+        )
+        assertTrue(proposed is LlmProposer.Proposed.Failed)
+        assertTrue((proposed as LlmProposer.Proposed.Failed).reason.contains("proposerNotes"))
+    }
+
+    @Test
+    fun `a candidate that only rewords the parent is refused, an added instruction is not`() = runBlocking {
+        val parentWithOne = Genome.baseline().copy(
+            instructions = listOf("Verify before claiming done."),
+        ).identified()
+        val reword = parentWithOne.copy(
+            label = "gen-reword",
+            hypothesis = "Same thing, said differently.",
+            instructions = listOf("Always verify before you claim you are done."),
+            proposerNotes = "Evidence: reworded.",
+        )
+        val refused = LlmProposer.propose(
+            FakeModelCaller(proposerGenome = { reword }),
+            parentWithOne, null, emptyList(), LiveEvaluator.proposerView().tasks,
+        )
+        assertTrue(refused is LlmProposer.Proposed.Failed)
+        assertTrue((refused as LlmProposer.Proposed.Failed).reason.contains("reword"))
+        val added = parentWithOne.copy(
+            label = "gen-added",
+            hypothesis = "A second check should catch renames.",
+            instructions = parentWithOne.instructions + "Check renames twice.",
+            proposerNotes = "Evidence: the parent over-renames.",
+        )
+        val accepted = LlmProposer.propose(
+            FakeModelCaller(proposerGenome = { added }),
+            parentWithOne, null, emptyList(), LiveEvaluator.proposerView().tasks,
+        )
+        assertTrue(accepted is LlmProposer.Proposed.Candidate)
+    }
+
+    @Test
+    fun `an instructions-hash duplicate is refused and names the duplicate`() = runBlocking {
+        val root = java.io.File.createTempFile("proposer-dedupe", "").apply { delete(); mkdirs() }
+        try {
+            val store = GenomeStore(root)
+            val existing = store.save(
+                parent.copy(
+                    label = "existing",
+                    hypothesis = "First.",
+                    instructions = listOf("Verify before claiming done."),
+                    proposerNotes = "Evidence: first.",
+                ).identified(),
+            )
+            val candidate = parent.copy(
+                label = "dup",
+                hypothesis = "A different hypothesis.",
+                instructions = listOf("Verify before claiming done."),
+                proposerNotes = "Evidence: dup.",
+            )
+            val proposed = LlmProposer.propose(
+                FakeModelCaller(proposerGenome = { candidate }),
+                parent, null, emptyList(), LiveEvaluator.proposerView().tasks, store = store,
+            )
+            assertTrue(proposed is LlmProposer.Proposed.Failed)
+            val reason = (proposed as LlmProposer.Proposed.Failed).reason
+            assertTrue(reason.contains("duplicate instructions"))
+            assertTrue(reason.contains(existing.id))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `a hypothesis duplicate is refused and names the duplicate`() = runBlocking {
+        val root = java.io.File.createTempFile("proposer-dedupe-h", "").apply { delete(); mkdirs() }
+        try {
+            val store = GenomeStore(root)
+            val existing = store.save(
+                parent.copy(
+                    label = "existing",
+                    hypothesis = "A verify line should help.",
+                    instructions = listOf("Verify before claiming done."),
+                    proposerNotes = "Evidence: first.",
+                ).identified(),
+            )
+            val candidate = parent.copy(
+                label = "dup",
+                hypothesis = "A verify line should help.",
+                instructions = listOf("Verify before claiming done.", "Check renames twice."),
+                proposerNotes = "Evidence: dup.",
+            )
+            val proposed = LlmProposer.propose(
+                FakeModelCaller(proposerGenome = { candidate }),
+                parent, null, emptyList(), LiveEvaluator.proposerView().tasks, store = store,
+            )
+            assertTrue(proposed is LlmProposer.Proposed.Failed)
+            val reason = (proposed as LlmProposer.Proposed.Failed).reason
+            assertTrue(reason.contains("duplicate hypothesis"))
+            assertTrue(reason.contains(existing.id))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `a hypothesis already in the archive is refused`() = runBlocking {
+        val candidate = parent.copy(
+            label = "dup",
+            hypothesis = "A verify line should help.",
+            instructions = listOf("Verify before claiming done.", "Check renames twice."),
+            proposerNotes = "Evidence: dup.",
+        )
+        val archive = listOf(
+            ArchiveEntry(genomeId = "abcdef0123456789", hypothesis = "A verify line should help."),
+        )
+        val proposed = LlmProposer.propose(
+            FakeModelCaller(proposerGenome = { candidate }),
+            parent, null, archive, LiveEvaluator.proposerView().tasks,
+        )
+        assertTrue(proposed is LlmProposer.Proposed.Failed)
+        val reason = (proposed as LlmProposer.Proposed.Failed).reason
+        assertTrue(reason.contains("duplicate hypothesis"))
+        assertTrue(reason.contains("abcdef0123456789"))
     }
 }
