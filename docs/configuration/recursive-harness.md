@@ -561,6 +561,61 @@ is nothing left to improve.
 +Doctor's Gradle check passing, the smoke test running, the suite
 +becoming FULL) is verified after install, not in the VM.
 +
++## P11 — proposer validation, gate-feasibility check, gate characterization (shipped)
++
++**Proposer validation.** The proposer twice wrote a skill value as a
++JSON object where the genome schema needs a plain string, and both
++proposals died in `decodeFromString` before any evaluation. The SYSTEM
++prompt now shows the format explicitly — "Skill values are PLAIN TEXT
++(the skill's instructions), never an object" — with one example kept
++as `SKILLS_FORMAT_EXAMPLE` so a test can prove the example itself
++parses. The example does not prove the error is gone; what is proven
++is the validator: when decoding fails or the genome breaks the rules,
++the proposer is asked ONCE more with its own error message, and the
++second call's tokens count toward the same proposal. Any other refusal
++(no JSON, identical, reword, blank notes, duplicate, model call
++failed) is final — a re-ask cannot change those verdicts. A defective
++genome never reaches the store, the archive or evaluation. Failures
++that died on validation are counted separately (`validationFailed`),
++and the run summary names them ("— validation failed: N").
++
++**Gate-feasibility check.** Promotion needs a candidate to beat the
++parent by at least 2 tasks on average, so when the parent's latest
++VALID report for the run's suite shows it failed fewer than 2 decided
++tasks, no candidate can gain 2 and a run would only burn quota. The
++host refuses to start such a run — "Benchmark saturated: parent
++passed all but <n> of <total> tasks; promotion needs +2. Run a single
++evaluation or add harder tasks." — with the last-run pointer written
++first, exactly like the Doctor-blocked path. No valid report, an
++invalid report, or a report from another suite or version says nothing
++about this run, so the run starts normally and the runner evaluates
++the parent. This is a 1-seed heuristic, not a proof that promotion is
++impossible, so the screen offers "Run anyway" — only after a
++saturated refusal, and only as an explicit tap. The check decides
++whether a run starts; it never touches scoring, screening,
++confirmation, or the gate itself.
++
++**Gate characterization.** `GateCharacterizationTest` freezes the
++gate's current behaviour as golden tests: +2 with no holdout drop is
++approved; +1 and ties are rejected; a holdout drop is rejected; an
++invalid report on either side is rejected; different suites, worker
++pins or critic pins are never compared; safety violations and a
++missing holdout score are rejected; screening passes a candidate that
++exceeds its parent at 1 seed and rejects one that merely ties. If a
++later round changes the gate, these tests must be updated
++deliberately.
++
++Honest limits: the skills example can anchor the proposer (it may
++copy the example's wording), and with only two real failures nothing
++proves the example kills the error — the validator and the re-ask are
++the parts that are proven, by fixtures built from the two real
++failures. The feasibility check uses the parent's 1-seed report: a
++3-seed mean could in principle differ, which is why the override
++exists. Pre-screen, the Doctor smoke-test cache, the quick-run
++preset and harder tasks are deliberately NOT in this round: with the
++parent at 17/17 the pre-screen's subset is empty, so it would only
++make a useless run cheaper.
++
 ## Safety hardening (shipped with P3)
 
 Two more layers, added before the activation wiring shipped:

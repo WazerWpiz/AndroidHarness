@@ -522,6 +522,21 @@ internal fun RecursiveHarnessSection(container: AppContainer) {
                     }
                 }
             }
+            // Gate-feasibility refusal (P11): the run was not started
+            // because the benchmark is saturated. Offered only here, so
+            // a saturated refusal never silently becomes a run — the
+            // person has to ask for it.
+            if (runState?.saturated == true && !running) {
+                TextButton(
+                    onClick = {
+                        val caller = host.modelCaller ?: return@TextButton
+                        localError = null
+                        host.startRun(caller, File(context.filesDir, "evolve/work"), allowSaturated = true)
+                    },
+                ) {
+                    Text(stringResource(R.string.recursive_harness_run_anyway))
+                }
+            }
             runState?.summary?.let {
                 Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }

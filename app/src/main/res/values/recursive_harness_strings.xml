@@ -8,6 +8,7 @@
     <string name="recursive_harness_empty" translatable="false">No genomes have been archived. Candidates appear here after an evaluation.</string>
     <string name="recursive_harness_rule" translatable="false">Weights are never modified. Safety checks are never evolved.</string>
     <string name="recursive_harness_run" translatable="false">Run one evolution</string>
+    <string name="recursive_harness_run_anyway" translatable="false">Run anyway</string>
     <string name="recursive_harness_running" translatable="false">Running…</string>
     <string name="recursive_harness_stop" translatable="false">Stop</string>
     <string name="recursive_harness_promotable" translatable="false">Ready to promote</string>

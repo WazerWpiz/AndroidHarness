@@ -80,6 +80,13 @@ data class EvolveRunState(
     val lastFailureReason: String? = null,
     /** Why the run stopped, from the ledger; null while it is still going. */
     val stopReason: String? = null,
+    /**
+     * True only when the run was refused by the gate-feasibility check
+     * (P11): the parent already passes all but fewer than 2 tasks, so
+     * no candidate can gain the +2 the gate needs. The screen offers
+     * "Run anyway" only while this is true.
+     */
+    val saturated: Boolean = false,
 )
 
 /**
@@ -152,6 +159,27 @@ class EvolveHost(val store: GenomeStore, val archive: Archive) {
     }
 
     /**
+     * The gate-feasibility check (P11): the reason a run must not
+     * start, or null when it may. Promotion needs a candidate to beat
+     * the parent by at least 2 tasks on average, so a parent whose
+     * latest VALID report for this run's suite shows fewer than 2
+     * decided failures cannot be beaten by 2. No report, an invalid
+     * report, or a report from another suite or version says nothing
+     * about this run — the runner evaluates the parent then, so the
+     * run starts normally. This is a 1-seed heuristic, not a proof.
+     */
+    private fun saturatedReason(parent: Genome, suite: EvalSuite): String? {
+        val report = store.report(parent.id) ?: return null
+        if (!report.valid) return null
+        if (report.suiteId != suite.suiteId) return null
+        if (report.suiteVersion != LiveEvaluator.SUITE_VERSION) return null
+        val failed = report.tasks.count { it.resolvedStatus == TaskStatus.FAIL }
+        if (failed >= 2) return null
+        return "Benchmark saturated: parent passed all but $failed of ${report.tasks.size} tasks; " +
+            "promotion needs +2. Run a single evaluation or add harder tasks."
+    }
+
+    /**
      * Starts a full run in the app-scoped [runScope]: navigating away from
      * Settings no longer cancels it. Returns false when a run is already
      * going. The run survives leaving the screen; it stops only if the app
@@ -169,6 +197,8 @@ class EvolveHost(val store: GenomeStore, val archive: Archive) {
         workDir: File = File(store.root, "work"),
         /** The delay the evaluators use between tasks and before retries; real in production, a no-op in tests. */
         delayFn: suspend (Long) -> Unit = { delay(it) },
+        /** Skip the gate-feasibility check: the screen offers this only after a saturated refusal. */
+        allowSaturated: Boolean = false,
     ): Boolean {
         if (_runState.value?.running == true) return false
         _runState.value = EvolveRunState(
@@ -202,6 +232,27 @@ class EvolveHost(val store: GenomeStore, val archive: Archive) {
                 val parent = store.active()?.let { store.load(it.genomeId) }
                     ?: store.load(Genome.baseline().id)
                     ?: store.save(Genome.baseline())
+                // Gate-feasibility check (P11): promotion needs a
+                // candidate to beat the parent by at least 2 tasks on
+                // average, so when the parent's latest valid report for
+                // this suite shows it failed fewer than 2 decided tasks,
+                // no candidate can gain 2 and the run would only burn
+                // quota. Same shape as the Doctor-blocked path: the
+                // pointer is written before the state flips. This is a
+                // 1-seed heuristic, not a proof — a 3-seed mean could in
+                // principle differ — so the screen offers "Run anyway".
+                if (!allowSaturated) {
+                    saturatedReason(parent, suite)?.let { reason ->
+                        runCatching {
+                            store.saveLastRun(LastRun(null, reason, System.currentTimeMillis()))
+                        }.onFailure { /* The pointer is best-effort; a failed write must not fail the run. */ }
+                        _runState.update {
+                            it?.copy(running = false, error = reason, phase = EvolveRunPhase.DONE, saturated = true)
+                                ?: EvolveRunState(running = false, error = reason, phase = EvolveRunPhase.DONE, saturated = true)
+                        }
+                        return@launch
+                    }
+                }
                 // Live progress (P6): the runner reports each real
                 // transition; the host merges it into the one run state,
                 // so the screen shows what the run is doing while it runs.
@@ -232,6 +283,7 @@ class EvolveHost(val store: GenomeStore, val archive: Archive) {
                     result.stoppedReason?.let { append(" — stopped: ").append(it) }
                     val failures = result.generations.flatMap { it.proposalFailures }
                     if (failures.isNotEmpty()) append(" — proposals failed: ").append(failures.joinToString("; ").take(200))
+                    if (result.validationFailures > 0) append(" — validation failed: ${result.validationFailures}")
                     if (result.promotableId == null) append(" — No candidate met the promotion bar.")
                 }
                 // The pointer is written BEFORE the state flips to

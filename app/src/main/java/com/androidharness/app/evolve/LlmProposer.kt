@@ -21,10 +21,27 @@ object LlmProposer {
 
     sealed interface Proposed {
         data class Candidate(val genome: Genome, val promptTokens: Long, val completionTokens: Long) : Proposed
-        data class Failed(val reason: String) : Proposed
+        /**
+         * [validationFailed] is true ONLY for a schema/rules failure
+         * (the JSON did not parse, or the genome breaks [GenomeRules]):
+         * the runner counts those separately, so a run summary can say
+         * how many proposals died on validation instead of on merit.
+         */
+        data class Failed(val reason: String, val validationFailed: Boolean = false) : Proposed
     }
 
     private val lenientJson = Json { ignoreUnknownKeys = true }
+
+    /**
+     * The skills-format example the SYSTEM prompt shows (P11): a skill
+     * value is PLAIN TEXT, never an object — the proposer twice wrote a
+     * skill value as an object and the genome JSON failed to parse.
+     * Kept as a value so tests can prove the example itself parses with
+     * the same parser that validates proposals. The example does not
+     * prove the error is gone — only the validator below does.
+     */
+    internal const val SKILLS_FORMAT_EXAMPLE =
+        "\"skills\": {\"rename-guard\": \"After renaming, re-read every file and list remaining occurrences of the old name. If any remain, fix them before finishing.\"}"
 
     private const val SYSTEM = """You are the proposer in a Darwin Gödel Machine loop: a coding agent that improves itself by rewriting its own genome. The genome is the agent's data: instructions, skills (full SKILL.md text), hooks and agent profiles. Model weights never change; only this genome evolves.
 
@@ -34,6 +51,7 @@ Rules for the genome you write:
 - Change a DIFFERENT dimension, not just a reword: change a skill, a hook, or an agent profile, or add/remove an instruction. A candidate that only rewords the parent's instructions — same instruction count, no skill, hook or agent change — is rejected.
 - "proposerNotes" is required, never blank: one or two sentences stating the EVIDENCE that motivated this change — which failing task, which pattern, what you saw. A candidate with blank proposerNotes is rejected.
 - "label" is short (max 80 characters). "instructions" is a list of plain instruction strings.
+- Skill values are PLAIN TEXT (the skill's instructions), never an object. Example: $SKILLS_FORMAT_EXAMPLE
 - Skill names match [a-z0-9][a-z0-9-]{0,63}. Hook "event" must be one of: session.start, message.received, prompt.before, tool.before, tool.after, tool.failed, permission.request, notification, stop, subagent.start, subagent.stop, compact.before, session.end. Hook "timeout" is 1-600 seconds.
 - NEVER name, touch or disable the trusted core: GenomeStore, Archive, PromotionGate, EvalHarness, SafetyProbes, BudgetLedger, ShellPolicy, SecretRedactor, build files, signing keys, or the holdout suite. Never mention permissions, plugins, MCP servers or the sandbox.
 - NEVER invent a benchmark result or claim a score. You only propose; evaluation happens afterwards, by the trusted evaluator.
@@ -137,6 +155,79 @@ Genome schema:
     fun instructionsHash(genome: Genome): String =
         Genome.sha256(genome.instructions.joinToString("\n"))
 
+    /**
+     * What one validation of a proposer output found. [reaskable] is
+     * true only for a schema/rules failure (a JSON that did not parse,
+     * or a genome that breaks [GenomeRules]): the model gets its own
+     * error message back and one chance to fix it. Every other refusal
+     * — no JSON at all, identical, reword, blank notes, duplicate — is
+     * final, because a re-ask cannot change the verdict.
+     */
+    private sealed interface Validated {
+        data class Candidate(val genome: Genome) : Validated
+        data class Failed(val reason: String, val validationFailed: Boolean, val reaskable: Boolean) : Validated
+    }
+
+    private fun validateProposal(
+        text: String,
+        parent: Genome,
+        archive: List<ArchiveEntry>,
+        store: GenomeStore?,
+    ): Validated {
+        val raw = extractJson(text)
+            ?: return Validated.Failed("proposer returned no JSON genome", validationFailed = false, reaskable = false)
+        val genome = try {
+            lenientJson.decodeFromString(Genome.serializer(), raw)
+        } catch (e: Exception) {
+            return Validated.Failed("proposer JSON did not parse: ${e.message}", validationFailed = true, reaskable = true)
+        }
+        val identified = genome.copy(
+            parent = parent.id,
+            createdAt = System.currentTimeMillis(),
+        ).identified()
+        try {
+            GenomeRules.requireValid(identified)
+        } catch (e: Exception) {
+            return Validated.Failed("proposed genome breaks the rules: ${e.message}", validationFailed = true, reaskable = true)
+        }
+        if (identified.canonical() == parent.canonical()) {
+            return Validated.Failed("proposed genome is identical to its parent", validationFailed = false, reaskable = false)
+        }
+        if (!dimensionChanged(parent, identified)) {
+            return Validated.Failed(
+                "proposed genome only rewords the parent's instructions: " +
+                    "change a skill, hook, agent profile, or add/remove an instruction",
+                validationFailed = false, reaskable = false,
+            )
+        }
+        if (identified.proposerNotes.isBlank()) {
+            return Validated.Failed(
+                "proposerNotes is empty: say what evidence motivated the change — " +
+                    "which failing task or pattern — never a blank note",
+                validationFailed = false, reaskable = false,
+            )
+        }
+        // Dedupe (P8): an instructions hash or a hypothesis that already
+        // exists is not a new experiment. The store holds every genome;
+        // the archive holds the hypotheses of the ones that were
+        // evaluated. The reason names the duplicate.
+        val hash = instructionsHash(identified)
+        val hypothesis = identified.hypothesis.trim()
+        val stored = store?.list().orEmpty()
+        stored.firstOrNull { instructionsHash(it) == hash }?.let {
+            return Validated.Failed("duplicate instructions of genome ${it.id}", validationFailed = false, reaskable = false)
+        }
+        if (hypothesis.isNotBlank()) {
+            stored.firstOrNull { it.hypothesis.trim() == hypothesis }?.let {
+                return Validated.Failed("duplicate hypothesis of genome ${it.id}", validationFailed = false, reaskable = false)
+            }
+            archive.firstOrNull { it.hypothesis.trim() == hypothesis }?.let {
+                return Validated.Failed("duplicate hypothesis of genome ${it.genomeId}", validationFailed = false, reaskable = false)
+            }
+        }
+        return Validated.Candidate(identified)
+    }
+
     suspend fun propose(
         caller: EvolveModelCaller,
         parent: Genome,
@@ -149,8 +240,9 @@ Genome schema:
         /** Why the parent's latest report is INVALID, when it is (see [promptFor]). */
         parentReportInvalid: String? = null,
     ): Proposed {
-        val result = try {
-            caller.complete(EvolveRole.PROPOSER, SYSTEM, promptFor(parent, parentReport, archive, trainingTasks, recurringHints, parentReportInvalid))
+        val user = promptFor(parent, parentReport, archive, trainingTasks, recurringHints, parentReportInvalid)
+        var result = try {
+            caller.complete(EvolveRole.PROPOSER, SYSTEM, user)
         } catch (e: CancellationException) {
             // Never swallow cancellation: a stopped run must stop, not burn
             // its remaining attempts as proposal failures.
@@ -158,54 +250,39 @@ Genome schema:
         } catch (e: Exception) {
             return Proposed.Failed("proposer model call failed: ${e.message}")
         }
-        val raw = extractJson(result.text) ?: return Proposed.Failed("proposer returned no JSON genome")
-        val genome = try {
-            lenientJson.decodeFromString(Genome.serializer(), raw)
-        } catch (e: Exception) {
-            return Proposed.Failed("proposer JSON did not parse: ${e.message}")
-        }
-        val identified = genome.copy(
-            parent = parent.id,
-            createdAt = System.currentTimeMillis(),
-        ).identified()
-        try {
-            GenomeRules.requireValid(identified)
-        } catch (e: Exception) {
-            return Proposed.Failed("proposed genome breaks the rules: ${e.message}")
-        }
-        if (identified.canonical() == parent.canonical()) {
-            return Proposed.Failed("proposed genome is identical to its parent")
-        }
-        if (!dimensionChanged(parent, identified)) {
-            return Proposed.Failed(
-                "proposed genome only rewords the parent's instructions: " +
-                    "change a skill, hook, agent profile, or add/remove an instruction",
-            )
-        }
-        if (identified.proposerNotes.isBlank()) {
-            return Proposed.Failed(
-                "proposerNotes is empty: say what evidence motivated the change — " +
-                    "which failing task or pattern — never a blank note",
-            )
-        }
-        // Dedupe (P8): an instructions hash or a hypothesis that already
-        // exists is not a new experiment. The store holds every genome;
-        // the archive holds the hypotheses of the ones that were
-        // evaluated. The reason names the duplicate.
-        val hash = instructionsHash(identified)
-        val hypothesis = identified.hypothesis.trim()
-        val stored = store?.list().orEmpty()
-        stored.firstOrNull { instructionsHash(it) == hash }?.let {
-            return Proposed.Failed("duplicate instructions of genome ${it.id}")
-        }
-        if (hypothesis.isNotBlank()) {
-            stored.firstOrNull { it.hypothesis.trim() == hypothesis }?.let {
-                return Proposed.Failed("duplicate hypothesis of genome ${it.id}")
-            }
-            archive.firstOrNull { it.hypothesis.trim() == hypothesis }?.let {
-                return Proposed.Failed("duplicate hypothesis of genome ${it.genomeId}")
+        var promptTokens = result.promptTokens
+        var completionTokens = result.completionTokens
+        // One re-ask, only for a schema/rules failure: the model gets the
+        // specific error back, with the original prompt still attached so
+        // it can regenerate the genome. The second call's tokens count
+        // toward this proposal, like the first call's. Cancellation is
+        // never a re-ask: a stopped run must stop.
+        var reasked = false
+        while (true) {
+            when (val validated = validateProposal(result.text, parent, archive, store)) {
+                is Validated.Candidate -> return Proposed.Candidate(validated.genome, promptTokens, completionTokens)
+                is Validated.Failed -> {
+                    if (validated.reaskable && !reasked) {
+                        reasked = true
+                        result = try {
+                            caller.complete(
+                                EvolveRole.PROPOSER, SYSTEM,
+                                user + "\n\nYour previous output failed: ${validated.reason}. " +
+                                    "Fix it and output exactly one JSON object.",
+                            )
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            return Proposed.Failed("proposer model call failed: ${e.message}")
+                        }
+                        promptTokens += result.promptTokens
+                        completionTokens += result.completionTokens
+                        continue
+                    }
+                    val reason = if (reasked) "${validated.reason} (re-ask already tried)" else validated.reason
+                    return Proposed.Failed(reason, validationFailed = validated.validationFailed)
+                }
             }
         }
-        return Proposed.Candidate(identified, result.promptTokens, result.completionTokens)
     }
 }

@@ -10,13 +10,24 @@ data class GenerationResult(
     val promotableId: String?,
     val stoppedReason: String?,
     val proposalFailures: List<String> = emptyList(),
+    /**
+     * Proposal failures that died on validation (the JSON did not parse,
+     * or the genome broke the rules) — counted separately from failures
+     * on merit, so a run summary can say how much of the run was lost
+     * to malformed proposer output (P11).
+     */
+    val validationFailures: Int = 0,
 )
 
 data class RunResult(
     val generations: List<GenerationResult>,
     val promotableId: String?,
     val stoppedReason: String?,
-)
+) {
+    /** Validation failures across all generations. */
+    val validationFailures: Int
+        get() = generations.sumOf { it.validationFailures }
+}
 
 /**
  * The real evolution loop, after the Darwin Gödel Machine
@@ -384,6 +395,7 @@ class EvolutionRunner(
         val candidateIds = mutableListOf<String>()
         var best: Pair<Genome, EvalReport>? = null
         var attempts = 0
+        var validationFailures = 0
         // The proposer sees the training tasks of the run's suite, ids
         // and titles only; the holdouts stay hidden. In the lite suite
         // the real tasks are not run, so they are not designed for.
@@ -399,6 +411,7 @@ class EvolutionRunner(
             )) {
                 is LlmProposer.Proposed.Failed -> {
                     failures += proposed.reason
+                    if (proposed.validationFailed) validationFailures++
                     emitProgress(EvolveRunPhase.PROPOSING, generation, attempts, null, null, failures)
                     continue
                 }
@@ -491,6 +504,7 @@ class EvolutionRunner(
             promotableId = best?.first?.id,
             stoppedReason = ledger.stopReason() ?: if (budgetExceeded) "token budget exhausted" else null,
             proposalFailures = failures,
+            validationFailures = validationFailures,
         )
     }
 
