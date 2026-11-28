@@ -138,4 +138,57 @@ class DoctorTest {
         val up = Doctor.run(caller, UnavailableTestCommandRunner, File(root, "work"), networkProbe = { true })
         assertEquals(DoctorStatus.PASS, check(up, Doctor.ID_NETWORK).status)
     }
+
+    /**
+     * P10 — a ping is retried: on 2026-11-28 the same model failed
+     * the proposer ping, then the critic ping, across two Doctor runs,
+     * while the other roles passed — transient empty answers, not a
+     * broken model. Two empties then an answer must pass and not
+     * block; three empties must still fail after exactly three
+     * attempts and still block.
+     */
+    private class CountingCaller(
+        private val inner: EvolveModelCaller,
+        private val answer: suspend (EvolveRole, Int, String, String, Int) -> ModelCallResult,
+    ) : EvolveModelCaller {
+        val attempts = mutableMapOf<EvolveRole, Int>()
+        override suspend fun isConfigured(role: EvolveRole): Boolean = true
+        override suspend fun complete(
+            role: EvolveRole,
+            system: String,
+            user: String,
+            maxOutputTokens: Int,
+        ): ModelCallResult {
+            val n = (attempts[role] ?: 0) + 1
+            attempts[role] = n
+            return answer(role, n, system, user, maxOutputTokens)
+        }
+    }
+
+    @Test
+    fun `a ping that answers after two empty responses passes and does not block`() = runBlocking {
+        val inner = FakeModelCaller(worker = FakeModelCaller.correctWorker())
+        val caller = CountingCaller(inner) { role, n, system, user, maxTokens ->
+            if (role == EvolveRole.PROPOSER && n < 3) ModelCallResult("", 0, 0)
+            else inner.complete(role, system, user, maxTokens)
+        }
+        val result = Doctor.run(caller, UnavailableTestCommandRunner, File(root, "work"), networkProbe = { true })
+        assertEquals(DoctorStatus.PASS, check(result, Doctor.pingId(EvolveRole.PROPOSER)).status)
+        assertEquals(3, caller.attempts[EvolveRole.PROPOSER])
+        assertFalse(result.blocksRun)
+    }
+
+    @Test
+    fun `a ping that always answers empty still fails after exactly three attempts and blocks`() = runBlocking {
+        val inner = FakeModelCaller(worker = FakeModelCaller.correctWorker())
+        val caller = CountingCaller(inner) { role, _, system, user, maxTokens ->
+            if (role == EvolveRole.CRITIC) ModelCallResult("", 0, 0)
+            else inner.complete(role, system, user, maxTokens)
+        }
+        val result = Doctor.run(caller, UnavailableTestCommandRunner, File(root, "work"), networkProbe = { true })
+        assertEquals(DoctorStatus.FAIL, check(result, Doctor.pingId(EvolveRole.CRITIC)).status)
+        assertEquals(3, caller.attempts[EvolveRole.CRITIC])
+        assertTrue(result.blocksRun)
+        assertTrue(result.blockReason!!.contains("critic"))
+    }
 }

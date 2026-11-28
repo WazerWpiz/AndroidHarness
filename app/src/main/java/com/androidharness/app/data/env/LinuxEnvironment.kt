@@ -292,6 +292,34 @@ internal fun gitSystemAttributesEnvOf(
 }
 
 /**
+ * JVM re-rooting (P10), the same baked-Termux-prefix disease as git
+ * above: the Termux-built JDK 21 ships `java.io.tmpdir` and
+ * `user.home` compiled to /data/data/com.termux/…, which does not exist
+ * for this app UID, so Gradle's native loader cannot create its
+ * extraction file and `gradle --version` dies with "Could not
+ * initialize native services. Failed to load native library
+ * 'libnative-platform…'". The app already exports HOME and TMPDIR
+ * pointing inside the prefix, but this JVM ignores those env vars —
+ * only -D properties override the baked-in paths (verified on-device:
+ * redirecting the two properties makes `gradle --version` succeed).
+ *
+ * JDK_JAVA_OPTIONS is picked up silently by every `java` invocation
+ * (JDK 21), including the `gradle` launcher, with no "Picked up"
+ * stderr noise — unlike JAVA_TOOL_OPTIONS, whose notice line would
+ * pollute the Doctor's `gradle --version` probe. Both values stay
+ * inside the app's own prefix (the same expressions processEnv uses
+ * for HOME and TMPDIR); nothing here ever points at Android/data,
+ * the sdcard, or any shared storage.
+ *
+ * Pure so it can be tested without a device, like
+ * [gitSystemConfigEnvOf].
+ */
+internal fun jvmRedirectEnvOf(prefix: File): Map<String, String> = mapOf(
+    "JDK_JAVA_OPTIONS" to "-Djava.io.tmpdir=${prefix.absolutePath}/tmp " +
+        "-Duser.home=${prefix.absolutePath}/home",
+)
+
+/**
  * Installs a self-contained Linux userspace (bash, coreutils, git, python,
  * node…) into the app's private storage, sourced from the public Termux
  * package repository. No root, no external app required.
@@ -988,6 +1016,11 @@ class LinuxEnvironmentManager(
         if (javaHome != null) put("JAVA_HOME", javaHome)
         put("HOME", "${prefix.absolutePath}/home")
         put("TMPDIR", "${prefix.absolutePath}/tmp")
+        // JVM re-rooting (P10): see [jvmRedirectEnvOf]. Every JVM
+        // launched through this shell inherits it — Gradle, d8, and any
+        // java the agent runs — so the baked-in Termux paths can never
+        // break a tool again.
+        putAll(jvmRedirectEnvOf(prefix))
         put("PREFIX", prefix.absolutePath)
         put("npm_config_cache", File(sharedCacheRoot, "npm").absolutePath)
         put("PIP_CACHE_DIR", File(sharedCacheRoot, "pip").absolutePath)

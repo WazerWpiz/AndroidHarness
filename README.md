@@ -48,6 +48,7 @@ This fork is upstream AndroidHarness plus the features below — nothing else is
 - **Build toolchain indicator (P7).** The section shows what the test runner reports about the build toolchain, and warns when it is missing that the run uses the lite suite (13 live tasks, no real tasks) instead of the full suite.
 - **Fair evaluation (P8).** Task results are PASS/FAIL/ERROR/SKIPPED (only decided tasks count), invalid reports (>20% ERROR/SKIPPED) are never promoted, candidates are screened at 1 seed and confirmed on 3 seeds, and promotion needs +2 tasks on average with no holdout regression; a Doctor preflight checks the toolchain, models and storage before each run.
 - **Archive pruning (P9).** After each run the archive keeps the best 10 entries plus the active genome's lineage and the last run's candidate, so the list never piles up; each row can also be deleted by hand, with the active genome, its lineage, the last run's candidate and parents protected. Pruning and deleting remove list rows only — genomes and reports stay saved and exportable.
+- **JVM redirect and ping retry (P10).** The shell now passes `JDK_JAVA_OPTIONS` redirecting `java.io.tmpdir` and `user.home` inside the app's own Linux prefix, so the Termux JDK's baked-in `/data/data/com.termux/…` paths no longer break Gradle; the Doctor retries each model ping up to 3 times before blocking a run on a transient empty answer.
 
 ## Screenshots
 

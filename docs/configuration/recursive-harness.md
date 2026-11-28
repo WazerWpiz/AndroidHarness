@@ -533,6 +533,34 @@ is nothing left to improve.
 +count. With a long active lineage the list can still grow, just never
 +by piling up losers.
 +
++**JVM redirect + ping retry (P10).** Root cause, found on-device:
++Gradle is not corrupt (9.9.3, all jars present including the aarch64
++native-platform jar). The Termux-built JDK 21 ships `java.io.tmpdir`
++and `user.home` baked to `/data/data/com.termux/…`, which does not
++exist for this app UID, so Gradle's native loader cannot create its
++extraction file and `gradle --version` fails with "Could not
++initialize native services". The app already exports HOME and TMPDIR
++inside its own prefix, but this JVM ignores those env vars — only -D
++properties override the baked-in paths. The fix is one entry in
++`processEnv()`: `JDK_JAVA_OPTIONS=-Djava.io.tmpdir=<prefix>/tmp
++-Duser.home=<prefix>/home`, picked up silently by every `java`
++invocation (JDK 21), including the `gradle` launcher. Both values
++stay inside the app's own prefix — nothing ever points at
++Android/data, the sdcard, or any shared storage. The Doctor's model
++pings are also retried up to 3 attempts (1s, then 2s backoff) before
++a ping FAILs: on 2026-11-28 the failures rotated between roles with
++the same model, i.e. transient empty answers, not a broken model.
++A ping that fails all three attempts still FAILs and still blocks
++the run, and the ping itself stays minimal (one word, 8 output
++tokens).
++
++Honest limits: the redirect only fixes JVM tools launched through
++the app's shell — a user running gradle from another terminal still
++needs the flags by hand. The retry does not fix a model that is
++genuinely down; three failures still block. The on-phone proof (the
++Doctor's Gradle check passing, the smoke test running, the suite
++becoming FULL) is verified after install, not in the VM.
++
 ## Safety hardening (shipped with P3)
 
 Two more layers, added before the activation wiring shipped:

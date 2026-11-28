@@ -5,6 +5,7 @@ import java.net.InetSocketAddress
 import java.net.Socket
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 
@@ -35,6 +36,11 @@ data class DoctorCheck(
  * Cost: the whole preflight is cheap except the smoke test (one tiny
  * Gradle build, up to 120 seconds) and the three minimal one-word model
  * pings (each capped at 8 output tokens, not literally one token).
+ * A ping is retried up to [PING_MAX_ATTEMPTS] times in total (P10):
+ * the free-tier models sometimes answer a ping with empty text, and
+ * the failures rotate between roles, so one empty answer is not proof
+ * the model is down. A ping that fails every attempt still FAILs and
+ * still blocks the run.
  */
 @Serializable
 data class DoctorResult(
@@ -62,6 +68,15 @@ data class DoctorResult(
 object Doctor {
     /** One tiny Gradle build may take this long; slower is a failed check, never a hang. */
     const val SMOKE_TIMEOUT_MS = 120_000
+
+    /**
+     * Model-ping attempts in total per role (P10). The first attempt
+     * fails fast on an empty answer or a thrown error; the backoff
+     * between attempts is [PING_RETRY_DELAYS_MS]. A model that is
+     * genuinely down still fails all three and still blocks the run.
+     */
+    const val PING_MAX_ATTEMPTS = 3
+    private val PING_RETRY_DELAYS_MS = longArrayOf(1_000L, 2_000L)
 
     /** Below this free storage the check fails; below [BLOCK_FREE_BYTES] it blocks the run. */
     const val MIN_FREE_BYTES = 500L * 1024 * 1024
@@ -315,25 +330,38 @@ object Doctor {
         if (!configured) {
             return DoctorCheck(pingId(role), "${role.name.lowercase()} model ping", DoctorStatus.FAIL, "not configured — no model to ping")
         }
-        val result = try {
-            caller.complete(
-                role,
-                "You are a connectivity check. Reply with exactly one word: ok.",
-                "Reply with exactly one word: ok.",
-                maxOutputTokens = 8,
-            )
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            // The role is in the detail: the block reason must say WHICH
-            // model failed, not just that a ping failed.
-            return DoctorCheck(pingId(role), "${role.name.lowercase()} model ping", DoctorStatus.FAIL, "the ${role.name.lowercase()} ping failed: ${e.message}".take(200))
+        // Retried (P10): a single empty answer from a free-tier model
+        // proves nothing — on 2026-11-28 the failures rotated between
+        // roles across two Doctor runs with the same model. Only a ping
+        // that fails every attempt blocks the run.
+        var lastFailure: String? = null
+        repeat(PING_MAX_ATTEMPTS) { attempt ->
+            try {
+                val result = caller.complete(
+                    role,
+                    "You are a connectivity check. Reply with exactly one word: ok.",
+                    "Reply with exactly one word: ok.",
+                    maxOutputTokens = 8,
+                )
+                if (result.text.isNotBlank()) {
+                    return DoctorCheck(pingId(role), "${role.name.lowercase()} model ping", DoctorStatus.PASS, "the model answered", result.text.trim().take(40))
+                }
+                lastFailure = "the ${role.name.lowercase()} model answered with empty text"
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // The role is in the detail: the block reason must say WHICH
+                // model failed, not just that a ping failed.
+                lastFailure = "the ${role.name.lowercase()} ping failed: ${e.message}".take(200)
+            }
+            if (attempt < PING_MAX_ATTEMPTS - 1) delay(PING_RETRY_DELAYS_MS[attempt])
         }
-        return if (result.text.isNotBlank()) {
-            DoctorCheck(pingId(role), "${role.name.lowercase()} model ping", DoctorStatus.PASS, "the model answered", result.text.trim().take(40))
-        } else {
-            DoctorCheck(pingId(role), "${role.name.lowercase()} model ping", DoctorStatus.FAIL, "the ${role.name.lowercase()} model answered with empty text")
-        }
+        return DoctorCheck(
+            pingId(role),
+            "${role.name.lowercase()} model ping",
+            DoctorStatus.FAIL,
+            "${lastFailure ?: "the ${role.name.lowercase()} model did not answer its ping"} (after $PING_MAX_ATTEMPTS attempts)",
+        )
     }
 
     private fun probeFixtures(): DoctorCheck {
